@@ -93,8 +93,12 @@ export async function transcribeViaProxy(
   }
 
   const json = JSON.parse(body);
+
+  // Bug #9: Whisper pode retornar text undefined/null/'' para áudio silencioso
+  const text: string = typeof json.text === 'string' ? json.text : '';
+
   return {
-    text: json.text,
+    text,
     audioSeconds: json.audio_seconds ?? 0,
     costUSD: json.cost_usd ?? 0,
   };

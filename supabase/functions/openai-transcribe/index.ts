@@ -23,6 +23,9 @@ import { checkRateLimit, rateLimitHeaders } from '../_shared/rate-limit.ts';
 const WHISPER_USD_PER_MINUTE = 0.006;
 const OPENAI_TIMEOUT_MS = 115_000; // 115s — áudio pode ser grande; edge tem 120s
 
+// Seg #2: Whisper aceita até 25 MB; rejeitamos antes de chegar na OpenAI
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // 25 MB
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -66,6 +69,12 @@ Deno.serve(async (req) => {
     );
   }
 
+  // Seg #2: validar tamanho do arquivo antes de repassar à OpenAI
+  const audioBytes = Number(req.headers.get('x-audio-bytes') ?? 0);
+  if (audioBytes > MAX_AUDIO_BYTES) {
+    return json(413, { error: `Audio file too large (max ${MAX_AUDIO_BYTES / 1024 / 1024} MB)` });
+  }
+
   // Forward the multipart body straight to Whisper. We don't parse it — that
   // would force-load the entire audio file into memory.
   const contentType = req.headers.get('content-type') ?? '';
@@ -105,8 +114,13 @@ Deno.serve(async (req) => {
 
   if (!upstream.ok) {
     const errText = await upstream.text();
-    return json(upstream.status, {
-      error: `OpenAI ${upstream.status}: ${errText.slice(0, 500)}`,
+    // Seg #2: logar internamente mas não expor detalhes do upstream ao cliente
+    console.error(`[openai-transcribe] upstream error ${upstream.status}: ${errText.slice(0, 500)}`);
+    const clientStatus = upstream.status === 429 ? 429 : 502;
+    return json(clientStatus, {
+      error: upstream.status === 429
+        ? 'Limite de transcrições OpenAI atingido. Tente novamente em instantes.'
+        : 'Erro no serviço de transcrição. Tente novamente em instantes.',
     });
   }
 

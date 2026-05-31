@@ -26,6 +26,7 @@
 
 import { create } from 'zustand';
 import { Alert } from 'react-native';
+import * as FileSystem from 'expo-file-system/legacy';
 import { transcribeAudio, summarizeText } from './openai';
 import { setField, extractPatientName } from './db';
 import {
@@ -33,7 +34,7 @@ import {
   dequeueTranscription,
   isNetworkError,
 } from './transcription-queue';
-import { logError } from './log';
+import { logError, logWarn } from './log';
 
 // ─── Tipos ────────────────────────────────────────────────────────────────────
 
@@ -101,8 +102,31 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
     void (async () => {
       try {
         const text = await transcribeAudio(item.uri);
+
+        // Bug #9: transcrição vazia (áudio silencioso ou sem fala detectada)
+        if (!text || text.trim().length === 0) {
+          Alert.alert(
+            'Nenhuma fala detectada',
+            'O áudio não contém fala reconhecível. Verifique o microfone e tente novamente.'
+          );
+          return;
+        }
+
         await setField(item.fileName, 'transcript', text);
         await dequeueTranscription(item.fileName);
+
+        // Bug #8: deletar áudio PHI após transcrição bem-sucedida.
+        // O texto já está cifrado no SQLite — o .m4a bruto não é mais necessário
+        // e não deve permanecer em disco sem proteção.
+        try {
+          const info = await FileSystem.getInfoAsync(item.uri);
+          if (info.exists) {
+            await FileSystem.deleteAsync(item.uri, { idempotent: true });
+          }
+        } catch (deleteErr) {
+          // Falha silenciosa: não bloquear o fluxo por erro de limpeza
+          logWarn('processing-store.deleteAudio', deleteErr);
+        }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         if (isNetworkError(err)) {

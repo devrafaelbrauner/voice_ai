@@ -280,7 +280,8 @@ export async function transcribeAudio(uri: string): Promise<string> {
     logWarn('api_usage', e);
   }
 
-  return json.text as string;
+  // Bug #9: normalizar undefined/null para string vazia (verificado no caller)
+  return typeof json.text === 'string' ? json.text : '';
 }
 
 export interface PromptTemplate {

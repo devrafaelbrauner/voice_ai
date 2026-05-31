@@ -18,6 +18,11 @@ const PRICING = {
 const ALLOWED_MODELS = new Set(Object.keys(PRICING));
 const OPENAI_TIMEOUT_MS = 55_000; // 55s (edge functions have 60s limit)
 
+// Seg #2: limites de validação de payload
+const MAX_MESSAGES = 20;
+const MAX_CONTENT_CHARS = 60_000; // ~15k tokens — segurança contra payload enorme
+const ALLOWED_ROLES = new Set(['system', 'user', 'assistant']);
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -75,6 +80,24 @@ Deno.serve(async (req) => {
     return json(400, { error: 'messages must be a non-empty array' });
   }
 
+  // Seg #2: validar estrutura e tamanho das mensagens
+  if (body.messages.length > MAX_MESSAGES) {
+    return json(400, { error: `Too many messages (max ${MAX_MESSAGES})` });
+  }
+  let totalChars = 0;
+  for (const msg of body.messages) {
+    if (!ALLOWED_ROLES.has(msg.role)) {
+      return json(400, { error: `Invalid message role: ${msg.role}` });
+    }
+    if (typeof msg.content !== 'string') {
+      return json(400, { error: 'Each message must have a string content field' });
+    }
+    totalChars += msg.content.length;
+    if (totalChars > MAX_CONTENT_CHARS) {
+      return json(400, { error: 'Total message content exceeds size limit' });
+    }
+  }
+
   // ── OpenAI call with timeout ────────────────────────────────
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
@@ -107,8 +130,13 @@ Deno.serve(async (req) => {
 
   if (!upstream.ok) {
     const errText = await upstream.text();
-    return json(upstream.status, {
-      error: `OpenAI ${upstream.status}: ${errText.slice(0, 500)}`,
+    // Seg #2: logar internamente mas não expor detalhes do upstream ao cliente
+    console.error(`[openai-chat] upstream error ${upstream.status}: ${errText.slice(0, 500)}`);
+    const clientStatus = upstream.status === 429 ? 429 : 502;
+    return json(clientStatus, {
+      error: upstream.status === 429
+        ? 'Limite de requisições OpenAI atingido. Tente novamente em instantes.'
+        : 'Erro no serviço de IA. Tente novamente em instantes.',
     });
   }
 
