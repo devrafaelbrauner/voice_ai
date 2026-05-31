@@ -1,6 +1,7 @@
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { Alert } from 'react-native';
+import * as FileSystem from 'expo-file-system/legacy';
+import { Alert, Platform } from 'react-native';
 import { DoctorProfile, formatDoctorHeader, formatCRM } from './doctor';
 
 interface PDFInput {
@@ -780,7 +781,20 @@ export async function exportRecordingToPDF(input: PDFInput): Promise<void> {
       html = buildGenericHTML(input);
     }
 
-    const { uri } = await Print.printToFileAsync({ html, base64: false });
+    // Samsung / Android: printToFileAsync sem outputFile explícito tenta gravar
+    // no diretório temporário do sistema, que o Knox/SELinux pode bloquear.
+    // Passar outputFile dentro do cacheDirectory do app resolve o problema.
+    const safeDir = FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? '';
+    const stamp = Date.now();
+    const outputFile = Platform.OS === 'android' && safeDir
+      ? `${safeDir}evopad_${stamp}.pdf`
+      : undefined; // iOS usa o caminho padrão sem problemas
+
+    const { uri } = await Print.printToFileAsync({
+      html,
+      base64: false,
+      ...(outputFile ? { outputFile } : {}),
+    });
 
     if (await Sharing.isAvailableAsync()) {
       await Sharing.shareAsync(uri, {
@@ -790,6 +804,14 @@ export async function exportRecordingToPDF(input: PDFInput): Promise<void> {
       });
     } else {
       Alert.alert('PDF gerado', `Arquivo salvo em:\n${uri}`);
+    }
+
+    // Limpar o PDF temporário após compartilhar (best-effort)
+    try {
+      const info = await FileSystem.getInfoAsync(uri);
+      if (info.exists) await FileSystem.deleteAsync(uri, { idempotent: true });
+    } catch {
+      // ignorar — arquivo temporário, sem impacto funcional
     }
   } catch (err: any) {
     Alert.alert('Erro ao exportar PDF', err?.message ?? String(err));
