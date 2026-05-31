@@ -760,59 +760,85 @@ function isControlledPrescription(templateName: string | null, body: string): bo
   return hasControlledMeds(body);
 }
 
+/**
+ * Gera o HTML de um documento médico a partir do PDFInput.
+ * Usado internamente por generatePdfFile e exportRecordingToPDF.
+ */
+function buildHtml(input: PDFInput): string {
+  const docTitle = getMedicalDocumentTitle(input.templateName);
+  if (docTitle) {
+    const body = input.summary ?? '';
+    if (docTitle === 'Receituário Médico') {
+      if (isControlledPrescription(input.templateName, body)) {
+        return buildSpecialPrescriptionHTML(input);
+      }
+      return buildBrandedPrescriptionHTML(input);
+    }
+    return buildMedicalDocumentHTML(input, docTitle);
+  }
+  return buildGenericHTML(input);
+}
+
+/**
+ * Gera o arquivo PDF a partir de um PDFInput e retorna o URI local.
+ * Não compartilha — use sharePdfFile() ou signAndSharePdf() depois.
+ *
+ * O chamador é responsável por excluir o arquivo temporário quando terminar.
+ */
+export async function generatePdfFile(input: PDFInput): Promise<string> {
+  const html = buildHtml(input);
+
+  // Samsung / Android: printToFileAsync sem outputFile explícito tenta gravar
+  // no diretório temporário do sistema, que o Knox/SELinux pode bloquear.
+  // Passar outputFile dentro do cacheDirectory do app resolve o problema.
+  const safeDir = FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? '';
+  const stamp = Date.now();
+  const outputFile =
+    Platform.OS === 'android' && safeDir
+      ? `${safeDir}evopad_${stamp}.pdf`
+      : undefined;
+
+  const { uri } = await Print.printToFileAsync({
+    html,
+    base64: false,
+    ...(outputFile ? { outputFile } : {}),
+  });
+
+  return uri;
+}
+
+/**
+ * Compartilha um PDF a partir do seu URI local.
+ * Limpa o arquivo do cache após o compartilhamento (best-effort).
+ */
+export async function sharePdfFile(uri: string, name: string): Promise<void> {
+  if (await Sharing.isAvailableAsync()) {
+    await Sharing.shareAsync(uri, {
+      mimeType: 'application/pdf',
+      dialogTitle: `Compartilhar ${name}.pdf`,
+      UTI: 'com.adobe.pdf',
+    });
+  } else {
+    Alert.alert('PDF gerado', `Arquivo salvo em:\n${uri}`);
+  }
+
+  // Limpar o PDF temporário após compartilhar (best-effort)
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    if (info.exists) await FileSystem.deleteAsync(uri, { idempotent: true });
+  } catch {
+    // ignorar — arquivo temporário, sem impacto funcional
+  }
+}
+
+/**
+ * Gera, opcionalmente assina e compartilha um PDF.
+ * Mantém o comportamento anterior quando não há assinatura.
+ */
 export async function exportRecordingToPDF(input: PDFInput): Promise<void> {
   try {
-    let html: string;
-    const docTitle = getMedicalDocumentTitle(input.templateName);
-    if (docTitle) {
-      const body = input.summary ?? '';
-      if (docTitle === 'Receituário Médico') {
-        if (isControlledPrescription(input.templateName, body)) {
-          // Receituário Controle Especial — 2 vias, formato ANVISA
-          html = buildSpecialPrescriptionHTML(input);
-        } else {
-          // Receituário comum — template visual personalizado Dr. Brauner
-          html = buildBrandedPrescriptionHTML(input);
-        }
-      } else {
-        html = buildMedicalDocumentHTML(input, docTitle);
-      }
-    } else {
-      html = buildGenericHTML(input);
-    }
-
-    // Samsung / Android: printToFileAsync sem outputFile explícito tenta gravar
-    // no diretório temporário do sistema, que o Knox/SELinux pode bloquear.
-    // Passar outputFile dentro do cacheDirectory do app resolve o problema.
-    const safeDir = FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? '';
-    const stamp = Date.now();
-    const outputFile = Platform.OS === 'android' && safeDir
-      ? `${safeDir}evopad_${stamp}.pdf`
-      : undefined; // iOS usa o caminho padrão sem problemas
-
-    const { uri } = await Print.printToFileAsync({
-      html,
-      base64: false,
-      ...(outputFile ? { outputFile } : {}),
-    });
-
-    if (await Sharing.isAvailableAsync()) {
-      await Sharing.shareAsync(uri, {
-        mimeType: 'application/pdf',
-        dialogTitle: `Compartilhar ${input.name}.pdf`,
-        UTI: 'com.adobe.pdf',
-      });
-    } else {
-      Alert.alert('PDF gerado', `Arquivo salvo em:\n${uri}`);
-    }
-
-    // Limpar o PDF temporário após compartilhar (best-effort)
-    try {
-      const info = await FileSystem.getInfoAsync(uri);
-      if (info.exists) await FileSystem.deleteAsync(uri, { idempotent: true });
-    } catch {
-      // ignorar — arquivo temporário, sem impacto funcional
-    }
+    const uri = await generatePdfFile(input);
+    await sharePdfFile(uri, input.name);
   } catch (err: any) {
     Alert.alert('Erro ao exportar PDF', err?.message ?? String(err));
   }

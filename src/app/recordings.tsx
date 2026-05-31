@@ -34,6 +34,7 @@ import {
   CloudOff,
   Mic,
   MoreHorizontal,
+  PenLine,
 } from 'lucide-react-native';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -56,8 +57,13 @@ import {
 } from '../services/processing-store';
 import { formatDefaultName } from '../services/recordings';
 import { openShareMenu, exportToMarkdown } from '../services/share';
-import { exportRecordingToPDF } from '../services/pdf';
+import { exportRecordingToPDF, generatePdfFile, sharePdfFile } from '../services/pdf';
 import { getDoctorProfile } from '../services/doctor';
+import {
+  getBirdIdToken,
+  signPdfWithBirdId,
+  cleanupTempPdf,
+} from '../services/bird-id';
 import { MermaidView } from '../components/MermaidView';
 import { AudioPlayerBar } from '../components/AudioPlayerBar';
 import { exportToEvoPad } from '../services/evopad-export';
@@ -639,6 +645,68 @@ export default function RecordingsScreen() {
       isMindmap: item.templateId === 'mindmap',
       doctor,
     });
+  };
+
+  const handleExportPDFSigned = async (item: Recording) => {
+    const displayName = item.customName ?? formatDefaultName(item.createdAt);
+    const doctor = await getDoctorProfile();
+
+    // Avisar se perfil não configurado (mesmo que no exportPDF normal)
+    const isPrescription =
+      item.templateId === 'medical_prescription' ||
+      item.templateId === 'medical_controlled_prescription';
+
+    if (isPrescription && !doctor.name?.trim() && !doctor.crmNumber?.trim()) {
+      await new Promise<void>((resolve) => {
+        Alert.alert(
+          'Perfil não configurado',
+          'Seus dados profissionais não estão preenchidos. A receita será gerada sem cabeçalho.\n\nConfigure em Ajustes → Perfil Profissional.',
+          [{ text: 'Continuar', style: 'default', onPress: () => resolve() }],
+          { cancelable: true, onDismiss: () => resolve() }
+        );
+      });
+    }
+
+    const token = await getBirdIdToken();
+    if (!token) {
+      Alert.alert(
+        'Token Bird ID não configurado',
+        'Vá em Configurações → Assinatura Digital e cole o token Bearer do Bird ID para habilitar a assinatura ICP-Brasil.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    let pdfUri: string | null = null;
+    let signedUri: string | null = null;
+
+    try {
+      // 1. Gerar PDF
+      setExportingUri(item.uri);
+      pdfUri = await generatePdfFile({
+        name: displayName,
+        createdAt: item.createdAt,
+        transcript: item.transcript,
+        summary: item.summary,
+        templateName: getTemplateName(item.templateId),
+        isMindmap: item.templateId === 'mindmap',
+        doctor,
+      });
+
+      // 2. Assinar com Bird ID
+      const result = await signPdfWithBirdId(pdfUri, token);
+      signedUri = result.uri;
+
+      // 3. Compartilhar PDF assinado
+      await sharePdfFile(signedUri, `${displayName}_assinado`);
+    } catch (err: any) {
+      Alert.alert('Erro ao assinar PDF', err?.message ?? String(err));
+    } finally {
+      setExportingUri(null);
+      // Limpar arquivos temporários
+      if (pdfUri) await cleanupTempPdf(pdfUri);
+      if (signedUri) await cleanupTempPdf(signedUri);
+    }
   };
 
   const handleExportMarkdown = async (item: Recording) => {
@@ -2227,6 +2295,21 @@ export default function RecordingsScreen() {
                 <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
                   <FileDown size={20} color={c.primary} />
                   <Text fontSize={15} color={c.text}>Exportar PDF</Text>
+                </XStack>
+              </Pressable>
+
+              <Pressable
+                onPress={() => {
+                  close();
+                  handleExportPDFSigned(item);
+                }}
+              >
+                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                  <PenLine size={20} color={c.primary} />
+                  <YStack f={1}>
+                    <Text fontSize={15} color={c.text}>Exportar PDF assinado</Text>
+                    <Text fontSize={11} color={c.textSecondary}>Bird ID · ICP-Brasil</Text>
+                  </YStack>
                 </XStack>
               </Pressable>
 

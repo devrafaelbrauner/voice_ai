@@ -28,6 +28,9 @@ import {
   Wifi,
   Eye,
   EyeOff,
+  PenLine,
+  BadgeCheck,
+  X as XIcon,
 } from 'lucide-react-native';
 import { Link } from 'expo-router';
 import { getCurrentUser, signOut, onAuthChange, updatePassword } from '../services/auth';
@@ -70,6 +73,13 @@ import {
 import { OnboardingModal } from '../components/OnboardingModal';
 import { BottomTabBar } from '../components/BottomTabBar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  getBirdIdToken,
+  setBirdIdToken,
+  clearBirdIdToken,
+  validateBirdIdToken,
+  type BirdIdUserInfo,
+} from '../services/bird-id';
 
 const ONBOARDING_SEEN_KEY = '@voice_ai_recorder/onboarding_seen/v1';
 
@@ -147,6 +157,13 @@ export default function SettingsScreen() {
   const [openrouterKey, setOpenrouterKey] = useState('');
   const [openrouterSaved, setOpenrouterSaved] = useState(false);
 
+  // Bird ID — Assinatura Digital
+  const [birdIdToken, setBirdIdTokenState] = useState('');
+  const [birdIdSaved, setBirdIdSaved] = useState(false);
+  const [showBirdIdToken, setShowBirdIdToken] = useState(false);
+  const [birdIdValidating, setBirdIdValidating] = useState(false);
+  const [birdIdUserInfo, setBirdIdUserInfo] = useState<BirdIdUserInfo | null>(null);
+
   const refreshBackupSummary = async () => {
     try {
       const payload = await buildBackup();
@@ -167,6 +184,7 @@ export default function SettingsScreen() {
     getOpenAIMode().then(setOpenAIMode);
     getEvoPadConfig().then(setEvoPadConfigState);
     getOpenRouterApiKey().then((k) => { if (k) setOpenrouterKey(k); });
+    getBirdIdToken().then((t) => { if (t) setBirdIdTokenState(t); });
     refreshBackupSummary();
     const currentSync = getSyncStatus();
     setSyncStatus(currentSync.status);
@@ -201,6 +219,56 @@ export default function SettingsScreen() {
       setEvoPadTestStatus('fail');
     }
     setTimeout(() => setEvoPadTestStatus('idle'), 4000);
+  };
+
+  const handleSaveBirdIdToken = async () => {
+    const token = birdIdToken.trim();
+    if (!token) {
+      Alert.alert('Token inválido', 'Cole o token Bearer obtido no portal Bird ID.');
+      return;
+    }
+    await setBirdIdToken(token);
+    setBirdIdSaved(true);
+    setTimeout(() => setBirdIdSaved(false), 1800);
+  };
+
+  const handleValidateBirdIdToken = async () => {
+    const token = birdIdToken.trim();
+    if (!token) {
+      Alert.alert('Token vazio', 'Cole o token Bearer antes de verificar.');
+      return;
+    }
+    setBirdIdValidating(true);
+    setBirdIdUserInfo(null);
+    try {
+      const info = await validateBirdIdToken(token);
+      setBirdIdUserInfo(info);
+      // Salva automaticamente se a validação for bem-sucedida
+      await setBirdIdToken(token);
+    } catch (err: any) {
+      Alert.alert('Erro na verificação', err?.message ?? String(err));
+    } finally {
+      setBirdIdValidating(false);
+    }
+  };
+
+  const handleClearBirdIdToken = async () => {
+    Alert.alert(
+      'Remover token Bird ID',
+      'O token será removido. Você poderá adicionar um novo a qualquer momento.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Remover',
+          style: 'destructive',
+          onPress: async () => {
+            await clearBirdIdToken();
+            setBirdIdTokenState('');
+            setBirdIdUserInfo(null);
+          },
+        },
+      ]
+    );
   };
 
   const handleExportBackup = async () => {
@@ -1298,6 +1366,153 @@ export default function SettingsScreen() {
           <Text fontSize={11} color={c.textMuted} lineHeight={16}>
             Token gerado automaticamente no .env do EvoPad. Procure a linha IMPORT_TOKEN
             e cole aqui. A URL padrão funciona se o EvoPad roda no mesmo Mac.
+          </Text>
+        </YStack>
+
+        {/* SEÇÃO: ASSINATURA DIGITAL */}
+        <SectionHeader label="Assinatura Digital" />
+
+        <YStack bg={c.bgCard} borderRadius="$3" p="$3" gap="$3">
+          {/* Cabeçalho Bird ID */}
+          <XStack alignItems="center" gap="$2" mb="$1">
+            <PenLine size={18} color={c.primary} />
+            <Text fontWeight="700" fontSize={14} color={c.text}>
+              Bird ID — ICP-Brasil
+            </Text>
+          </XStack>
+
+          {/* Info do titular (após validação) */}
+          {birdIdUserInfo && (
+            <XStack
+              bg="rgba(22,163,74,0.10)"
+              borderWidth={1}
+              borderColor="rgba(22,163,74,0.30)"
+              borderRadius={8}
+              p="$2"
+              alignItems="center"
+              gap="$2"
+            >
+              <BadgeCheck size={16} color="#16a34a" />
+              <YStack f={1}>
+                <Text fontWeight="700" fontSize={13} color="#16a34a">
+                  {birdIdUserInfo.name || 'Titular verificado'}
+                </Text>
+                {birdIdUserInfo.cpf ? (
+                  <Text fontSize={11} color={c.textSecondary}>
+                    CPF: {birdIdUserInfo.cpf}
+                  </Text>
+                ) : null}
+              </YStack>
+            </XStack>
+          )}
+
+          {/* Campo do token */}
+          <XStack
+            alignItems="center"
+            borderWidth={1}
+            borderColor={c.borderInput}
+            borderRadius={8}
+            backgroundColor={c.bgInput}
+            px="$3"
+            gap="$2"
+          >
+            <TextInput
+              style={{ flex: 1, paddingVertical: 12, fontSize: 13, color: c.text, fontFamily: 'monospace' }}
+              placeholder="Cole o token Bearer aqui..."
+              placeholderTextColor={c.textPlaceholder}
+              value={showBirdIdToken ? birdIdToken : birdIdToken ? '••••••••••••••••' : ''}
+              onChangeText={(t) => {
+                setBirdIdTokenState(t);
+                setBirdIdUserInfo(null);
+              }}
+              onFocus={() => setShowBirdIdToken(true)}
+              onBlur={() => setShowBirdIdToken(false)}
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry={false}
+            />
+            <Pressable
+              onPress={() => setShowBirdIdToken((v) => !v)}
+              accessibilityLabel={showBirdIdToken ? 'Ocultar token' : 'Mostrar token'}
+              hitSlop={8}
+            >
+              {showBirdIdToken ? (
+                <EyeOff size={18} color={c.textPlaceholder} />
+              ) : (
+                <Eye size={18} color={c.textPlaceholder} />
+              )}
+            </Pressable>
+            {birdIdToken.trim().length > 0 && (
+              <Pressable onPress={handleClearBirdIdToken} hitSlop={8} accessibilityLabel="Remover token">
+                <XIcon size={16} color={c.textPlaceholder} />
+              </Pressable>
+            )}
+          </XStack>
+
+          {/* Botões */}
+          <XStack gap="$2">
+            <Pressable
+              onPress={handleValidateBirdIdToken}
+              disabled={birdIdValidating || !birdIdToken.trim()}
+              style={{ flex: 1 }}
+              accessibilityLabel="Verificar token Bird ID"
+            >
+              <XStack
+                borderWidth={1}
+                borderColor={c.primary}
+                borderRadius={8}
+                p="$2"
+                alignItems="center"
+                justifyContent="center"
+                gap="$1"
+                opacity={birdIdValidating || !birdIdToken.trim() ? 0.5 : 1}
+              >
+                {birdIdValidating ? (
+                  <Text fontSize={12} fontWeight="700" color={c.primary}>
+                    Verificando...
+                  </Text>
+                ) : (
+                  <>
+                    <BadgeCheck size={14} color={c.primary} />
+                    <Text fontSize={12} fontWeight="700" color={c.primary}>
+                      Verificar
+                    </Text>
+                  </>
+                )}
+              </XStack>
+            </Pressable>
+
+            <Pressable
+              onPress={handleSaveBirdIdToken}
+              disabled={!birdIdToken.trim()}
+              style={{ flex: 1 }}
+              accessibilityLabel="Salvar token Bird ID"
+            >
+              <XStack
+                bg={birdIdSaved ? 'rgba(22,163,74,0.12)' : c.primary}
+                borderRadius={8}
+                p="$2"
+                alignItems="center"
+                justifyContent="center"
+                gap="$1"
+                opacity={!birdIdToken.trim() ? 0.5 : 1}
+              >
+                <Check size={14} color={birdIdSaved ? '#16a34a' : c.textOnAccent} />
+                <Text
+                  fontSize={12}
+                  fontWeight="700"
+                  color={birdIdSaved ? '#16a34a' : c.textOnAccent}
+                >
+                  {birdIdSaved ? 'Salvo!' : 'Salvar'}
+                </Text>
+              </XStack>
+            </Pressable>
+          </XStack>
+
+          <Text fontSize={11} color={c.textMuted} lineHeight={16}>
+            Obtenha o token Bearer no portal Bird ID (birdid.com.br) ou no
+            app Bird ID com o escopo "sign" ativado. O token é armazenado
+            de forma segura no dispositivo (SecureStore / Keychain).
           </Text>
         </YStack>
 
