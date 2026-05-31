@@ -670,8 +670,8 @@ export default function RecordingsScreen() {
     const token = await getBirdIdToken();
     if (!token) {
       Alert.alert(
-        'Token Bird ID não configurado',
-        'Vá em Configurações → Assinatura Digital e cole o token Bearer do Bird ID para habilitar a assinatura ICP-Brasil.',
+        'Signature session não configurada',
+        'Vá em Configurações → Assinatura Digital e cole a signature_session do Bird ID para habilitar a assinatura ICP-Brasil.',
         [{ text: 'OK' }]
       );
       return;

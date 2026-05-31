@@ -78,6 +78,9 @@ import {
   setBirdIdToken,
   clearBirdIdToken,
   validateBirdIdToken,
+  getSessionMeta,
+  isSessionExpired,
+  formatSessionExpiry,
   type BirdIdUserInfo,
 } from '../services/bird-id';
 
@@ -163,6 +166,7 @@ export default function SettingsScreen() {
   const [showBirdIdToken, setShowBirdIdToken] = useState(false);
   const [birdIdValidating, setBirdIdValidating] = useState(false);
   const [birdIdUserInfo, setBirdIdUserInfo] = useState<BirdIdUserInfo | null>(null);
+  const [birdIdExpired, setBirdIdExpired] = useState(false);
 
   const refreshBackupSummary = async () => {
     try {
@@ -185,6 +189,16 @@ export default function SettingsScreen() {
     getEvoPadConfig().then(setEvoPadConfigState);
     getOpenRouterApiKey().then((k) => { if (k) setOpenrouterKey(k); });
     getBirdIdToken().then((t) => { if (t) setBirdIdTokenState(t); });
+    getSessionMeta().then((meta) => {
+      if (!meta) return;
+      const expired = isSessionExpired(meta);
+      setBirdIdExpired(expired);
+      setBirdIdUserInfo({
+        name: meta.holderName,
+        cpf: meta.holderCpf,
+        expiresAt: meta.expiresAt,
+      });
+    });
     refreshBackupSummary();
     const currentSync = getSyncStatus();
     setSyncStatus(currentSync.status);
@@ -235,18 +249,22 @@ export default function SettingsScreen() {
   const handleValidateBirdIdToken = async () => {
     const token = birdIdToken.trim();
     if (!token) {
-      Alert.alert('Token vazio', 'Cole o token Bearer antes de verificar.');
+      Alert.alert('Token vazio', 'Cole o signature_session antes de verificar.');
       return;
     }
     setBirdIdValidating(true);
     setBirdIdUserInfo(null);
+    setBirdIdExpired(false);
     try {
       const info = await validateBirdIdToken(token);
       setBirdIdUserInfo(info);
+      setBirdIdExpired(false);
       // Salva automaticamente se a validação for bem-sucedida
       await setBirdIdToken(token);
+      setBirdIdSaved(true);
+      setTimeout(() => setBirdIdSaved(false), 1800);
     } catch (err: any) {
-      Alert.alert('Erro na verificação', err?.message ?? String(err));
+      Alert.alert('Sessão inválida', err?.message ?? String(err));
     } finally {
       setBirdIdValidating(false);
     }
@@ -1376,13 +1394,18 @@ export default function SettingsScreen() {
           {/* Cabeçalho Bird ID */}
           <XStack alignItems="center" gap="$2" mb="$1">
             <PenLine size={18} color={c.primary} />
-            <Text fontWeight="700" fontSize={14} color={c.text}>
-              Bird ID — ICP-Brasil
-            </Text>
+            <YStack f={1}>
+              <Text fontWeight="700" fontSize={14} color={c.text}>
+                Bird ID — ICP-Brasil
+              </Text>
+              <Text fontSize={11} color={c.textSecondary}>
+                signature_session OAuth
+              </Text>
+            </YStack>
           </XStack>
 
-          {/* Info do titular (após validação) */}
-          {birdIdUserInfo && (
+          {/* Badge de sessão válida */}
+          {birdIdUserInfo && !birdIdExpired && (
             <XStack
               bg="rgba(22,163,74,0.10)"
               borderWidth={1}
@@ -1397,20 +1420,50 @@ export default function SettingsScreen() {
                 <Text fontWeight="700" fontSize={13} color="#16a34a">
                   {birdIdUserInfo.name || 'Titular verificado'}
                 </Text>
-                {birdIdUserInfo.cpf ? (
-                  <Text fontSize={11} color={c.textSecondary}>
-                    CPF: {birdIdUserInfo.cpf}
-                  </Text>
-                ) : null}
+                <XStack gap="$2" flexWrap="wrap">
+                  {birdIdUserInfo.cpf ? (
+                    <Text fontSize={11} color={c.textSecondary}>
+                      CPF: {birdIdUserInfo.cpf}
+                    </Text>
+                  ) : null}
+                  {birdIdUserInfo.expiresAt ? (
+                    <Text fontSize={11} color={c.textSecondary}>
+                      · válida até {formatSessionExpiry(birdIdUserInfo.expiresAt)}
+                    </Text>
+                  ) : null}
+                </XStack>
               </YStack>
             </XStack>
           )}
 
-          {/* Campo do token */}
+          {/* Badge de sessão expirada */}
+          {birdIdUserInfo && birdIdExpired && (
+            <XStack
+              bg="rgba(220,38,38,0.08)"
+              borderWidth={1}
+              borderColor="rgba(220,38,38,0.30)"
+              borderRadius={8}
+              p="$2"
+              alignItems="center"
+              gap="$2"
+            >
+              <XIcon size={16} color="#dc2626" />
+              <YStack f={1}>
+                <Text fontWeight="700" fontSize={13} color="#dc2626">
+                  Sessão expirada
+                </Text>
+                <Text fontSize={11} color={c.textSecondary}>
+                  Gere uma nova signature_session no portal Bird ID.
+                </Text>
+              </YStack>
+            </XStack>
+          )}
+
+          {/* Campo da signature_session */}
           <XStack
             alignItems="center"
             borderWidth={1}
-            borderColor={c.borderInput}
+            borderColor={birdIdExpired ? 'rgba(220,38,38,0.50)' : c.borderInput}
             borderRadius={8}
             backgroundColor={c.bgInput}
             px="$3"
@@ -1418,12 +1471,13 @@ export default function SettingsScreen() {
           >
             <TextInput
               style={{ flex: 1, paddingVertical: 12, fontSize: 13, color: c.text, fontFamily: 'monospace' }}
-              placeholder="Cole o token Bearer aqui..."
+              placeholder="Cole a signature_session aqui..."
               placeholderTextColor={c.textPlaceholder}
               value={showBirdIdToken ? birdIdToken : birdIdToken ? '••••••••••••••••' : ''}
               onChangeText={(t) => {
                 setBirdIdTokenState(t);
                 setBirdIdUserInfo(null);
+                setBirdIdExpired(false);
               }}
               onFocus={() => setShowBirdIdToken(true)}
               onBlur={() => setShowBirdIdToken(false)}
@@ -1433,7 +1487,7 @@ export default function SettingsScreen() {
             />
             <Pressable
               onPress={() => setShowBirdIdToken((v) => !v)}
-              accessibilityLabel={showBirdIdToken ? 'Ocultar token' : 'Mostrar token'}
+              accessibilityLabel={showBirdIdToken ? 'Ocultar sessão' : 'Mostrar sessão'}
               hitSlop={8}
             >
               {showBirdIdToken ? (
@@ -1443,19 +1497,19 @@ export default function SettingsScreen() {
               )}
             </Pressable>
             {birdIdToken.trim().length > 0 && (
-              <Pressable onPress={handleClearBirdIdToken} hitSlop={8} accessibilityLabel="Remover token">
+              <Pressable onPress={handleClearBirdIdToken} hitSlop={8} accessibilityLabel="Remover sessão">
                 <XIcon size={16} color={c.textPlaceholder} />
               </Pressable>
             )}
           </XStack>
 
-          {/* Botões */}
+          {/* Botões: Verificar + Salvar */}
           <XStack gap="$2">
             <Pressable
               onPress={handleValidateBirdIdToken}
               disabled={birdIdValidating || !birdIdToken.trim()}
               style={{ flex: 1 }}
-              accessibilityLabel="Verificar token Bird ID"
+              accessibilityLabel="Verificar signature_session Bird ID"
             >
               <XStack
                 borderWidth={1}
@@ -1486,7 +1540,7 @@ export default function SettingsScreen() {
               onPress={handleSaveBirdIdToken}
               disabled={!birdIdToken.trim()}
               style={{ flex: 1 }}
-              accessibilityLabel="Salvar token Bird ID"
+              accessibilityLabel="Salvar signature_session Bird ID"
             >
               <XStack
                 bg={birdIdSaved ? 'rgba(22,163,74,0.12)' : c.primary}
@@ -1510,9 +1564,11 @@ export default function SettingsScreen() {
           </XStack>
 
           <Text fontSize={11} color={c.textMuted} lineHeight={16}>
-            Obtenha o token Bearer no portal Bird ID (birdid.com.br) ou no
-            app Bird ID com o escopo "sign" ativado. O token é armazenado
-            de forma segura no dispositivo (SecureStore / Keychain).
+            A signature_session é um token OAuth emitido pelo Bird ID que
+            permite múltiplas assinaturas ICP-Brasil enquanto estiver dentro
+            do prazo de validade ou não for revogada. Obtida no portal
+            birdid.com.br com o escopo "sign". Armazenada com segurança no
+            Keychain / SecureStore do dispositivo.
           </Text>
         </YStack>
 
