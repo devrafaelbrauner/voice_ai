@@ -1,8 +1,7 @@
-import { useState, useCallback } from 'react';
-import { ScrollView, Pressable } from 'react-native';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import { ScrollView, Pressable, Animated, View } from 'react-native';
 import { YStack, XStack, Text } from 'tamagui';
 import {
-  ArrowLeft,
   Mic,
   Users,
   FileText,
@@ -12,7 +11,7 @@ import {
   DollarSign,
   Cpu,
 } from 'lucide-react-native';
-import { Link, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { getAllRecordingsMeta, getCustomTemplates } from '../services/db';
 import { BUILTIN_TEMPLATES } from '../services/openai';
 import {
@@ -23,6 +22,9 @@ import {
 } from '../services/api_usage';
 import { useColors } from '../context/ThemeContext';
 import { logWarn } from '../services/log';
+import { BottomTabBar } from '../components/BottomTabBar';
+
+type Period = 'week' | 'month' | 'year' | 'all';
 
 interface Stats {
   totalRecordings: number;
@@ -36,6 +38,8 @@ interface Stats {
 }
 
 const DAYS_OF_WEEK = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+const MONTH_ABBR = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+const BRL_RATE = 5.5;
 
 function StatCard({
   icon,
@@ -64,167 +68,311 @@ function StatCard({
   );
 }
 
-export default function StatsScreen() {
-  const c = useColors();
-  const [stats, setStats] = useState<Stats | null>(null);
+function AnimatedBar({
+  count,
+  maxCount,
+  primaryColor,
+  bgCard,
+  textColor,
+}: {
+  count: number;
+  maxCount: number;
+  primaryColor: string;
+  bgCard: string;
+  textColor: string;
+}) {
+  const animValue = useRef(new Animated.Value(0)).current;
+  const targetWidth = maxCount > 0 ? (count / maxCount) * 100 : 0;
 
-  const loadStats = async () => {
-    try {
-    const meta = await getAllRecordingsMeta();
-    const customTemplates = await getCustomTemplates();
+  useEffect(() => {
+    Animated.timing(animValue, {
+      toValue: targetWidth,
+      duration: 400,
+      useNativeDriver: false,
+    }).start();
+  }, [targetWidth]);
 
-    const tplMap = new Map<string, string>();
-    BUILTIN_TEMPLATES.forEach((t) => tplMap.set(t.id, t.name));
-    customTemplates.forEach((t) => tplMap.set(t.id, t.name));
+  const widthInterpolated = animValue.interpolate({
+    inputRange: [0, 100],
+    outputRange: ['0%', '100%'],
+  });
 
-    const recordings: {
-      fileName: string;
-      date: Date;
-      meta: any;
-    }[] = [];
-    for (const [fileName, m] of meta.entries()) {
-      const match = fileName.match(/recording_(\d+)\.m4a/);
-      if (match) {
-        recordings.push({
-          fileName,
-          date: new Date(parseInt(match[1])),
-          meta: m,
-        });
-      }
-    }
+  return (
+    <View
+      style={{
+        flex: 1,
+        height: 32,
+        backgroundColor: bgCard,
+        borderRadius: 6,
+        overflow: 'hidden',
+        justifyContent: 'center',
+      }}
+    >
+      <Animated.View
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: widthInterpolated,
+          backgroundColor: count > 0 ? primaryColor : 'transparent',
+          borderRadius: 6,
+          justifyContent: 'center',
+          alignItems: 'flex-end',
+          paddingRight: 6,
+        }}
+      >
+        {count > 0 && (
+          <Text style={{ fontSize: 11, fontWeight: '700', color: '#fff' }}>
+            {count}
+          </Text>
+        )}
+      </Animated.View>
+      {count === 0 && (
+        <Text style={{ fontSize: 11, fontWeight: '700', color: textColor, paddingLeft: 6 }}>
+          0
+        </Text>
+      )}
+    </View>
+  );
+}
 
-    const total = recordings.length;
-    const uniquePatients = new Set(
-      recordings.map((r) => r.meta.patientName).filter(Boolean)
-    ).size;
-    const withTranscript = recordings.filter((r) => r.meta.transcript).length;
-    const withSummary = recordings.filter((r) => r.meta.summary).length;
+function computePerDay(
+  recordings: { date: Date }[],
+  period: Period
+): { day: string; count: number }[] {
+  const now = new Date();
 
-    // Atividade últimos 7 dias
-    const perDay: { day: string; count: number }[] = [];
-    const now = new Date();
+  if (period === 'week') {
+    const result: { day: string; count: number }[] = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date(now);
       d.setDate(d.getDate() - i);
       d.setHours(0, 0, 0, 0);
       const dayEnd = new Date(d);
       dayEnd.setDate(dayEnd.getDate() + 1);
-      const count = recordings.filter(
-        (r) => r.date >= d && r.date < dayEnd
-      ).length;
+      const count = recordings.filter((r) => r.date >= d && r.date < dayEnd).length;
       const label = i === 0 ? 'Hoje' : DAYS_OF_WEEK[d.getDay()];
-      perDay.push({ day: label, count });
+      result.push({ day: label, count });
     }
+    return result;
+  }
 
-    // Templates mais usados
-    const tplCounts = new Map<string, number>();
-    recordings.forEach((r) => {
-      if (r.meta.templateId) {
-        const name = tplMap.get(r.meta.templateId) ?? 'Outro';
-        tplCounts.set(name, (tplCounts.get(name) ?? 0) + 1);
-      }
-    });
-    const perTemplate = [...tplCounts.entries()]
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5);
+  if (period === 'month') {
+    // 4 weeks: "Sem 1" to "Sem 4"
+    const result: { day: string; count: number }[] = [];
+    for (let w = 0; w < 4; w++) {
+      const weekStart = new Date(now);
+      weekStart.setDate(weekStart.getDate() - 29 + w * 7);
+      weekStart.setHours(0, 0, 0, 0);
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekEnd.getDate() + 7);
+      const count = recordings.filter((r) => r.date >= weekStart && r.date < weekEnd).length;
+      result.push({ day: `Sem ${w + 1}`, count });
+    }
+    return result;
+  }
 
-    // Top pacientes
-    const ptCounts = new Map<string, number>();
-    recordings.forEach((r) => {
-      if (r.meta.patientName) {
-        ptCounts.set(
-          r.meta.patientName,
-          (ptCounts.get(r.meta.patientName) ?? 0) + 1
-        );
-      }
-    });
-    const topPatients = [...ptCounts.entries()]
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5);
+  // year or all: last 12 months
+  const result: { day: string; count: number }[] = [];
+  for (let m = 11; m >= 0; m--) {
+    const monthStart = new Date(now.getFullYear(), now.getMonth() - m, 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() - m + 1, 1);
+    const count = recordings.filter((r) => r.date >= monthStart && r.date < monthEnd).length;
+    result.push({ day: MONTH_ABBR[monthStart.getMonth()], count });
+  }
+  return result;
+}
 
-    // Custos da API OpenAI
-    let apiUsage: ApiUsageStats | null = null;
+function filterByPeriod<T extends { date: Date }>(recordings: T[], period: Period): T[] {
+  const now = new Date();
+  if (period === 'all') return recordings;
+  const days = period === 'week' ? 7 : period === 'month' ? 30 : 365;
+  const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  return recordings.filter((r) => r.date >= cutoff);
+}
+
+function computeStats(
+  recordings: { date: Date; meta: any }[],
+  tplMap: Map<string, string>,
+  period: Period,
+  apiUsage: ApiUsageStats | null
+): Stats {
+  const filtered = filterByPeriod(recordings, period);
+
+  const total = filtered.length;
+  const uniquePatients = new Set(
+    filtered.map((r) => r.meta.patientName).filter(Boolean)
+  ).size;
+  const withTranscript = filtered.filter((r) => r.meta.transcript).length;
+  const withSummary = filtered.filter((r) => r.meta.summary).length;
+
+  const perDay = computePerDay(filtered, period);
+
+  const tplCounts = new Map<string, number>();
+  filtered.forEach((r) => {
+    if (r.meta.templateId) {
+      const name = tplMap.get(r.meta.templateId) ?? 'Outro';
+      tplCounts.set(name, (tplCounts.get(name) ?? 0) + 1);
+    }
+  });
+  const perTemplate = [...tplCounts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+
+  const ptCounts = new Map<string, number>();
+  filtered.forEach((r) => {
+    if (r.meta.patientName) {
+      ptCounts.set(r.meta.patientName, (ptCounts.get(r.meta.patientName) ?? 0) + 1);
+    }
+  });
+  const topPatients = [...ptCounts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+
+  return {
+    totalRecordings: total,
+    uniquePatients,
+    withTranscript,
+    withSummary,
+    perDay,
+    perTemplate,
+    topPatients,
+    apiUsage,
+  };
+}
+
+const PERIOD_CHIPS: { key: Period; label: string }[] = [
+  { key: 'week', label: '7 dias' },
+  { key: 'month', label: 'Mês' },
+  { key: 'year', label: 'Ano' },
+  { key: 'all', label: 'Total' },
+];
+
+export default function StatsScreen() {
+  const c = useColors();
+  const [period, setPeriod] = useState<Period>('month');
+  const [allRecordings, setAllRecordings] = useState<{ date: Date; meta: any }[]>([]);
+  const [tplMap, setTplMap] = useState<Map<string, string>>(new Map());
+  const [apiUsage, setApiUsage] = useState<ApiUsageStats | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  const loadData = async () => {
     try {
-      apiUsage = await getApiUsageStats();
-    } catch (e) {
-      logWarn('stats', e);
-    }
+      const meta = await getAllRecordingsMeta();
+      const customTemplates = await getCustomTemplates();
 
-    setStats({
-      totalRecordings: total,
-      uniquePatients,
-      withTranscript,
-      withSummary,
-      perDay,
-      perTemplate,
-      topPatients,
-      apiUsage,
-    });
+      const map = new Map<string, string>();
+      BUILTIN_TEMPLATES.forEach((t) => map.set(t.id, t.name));
+      customTemplates.forEach((t) => map.set(t.id, t.name));
+
+      const recs: { date: Date; meta: any }[] = [];
+      for (const [fileName, m] of meta.entries()) {
+        const match = fileName.match(/recording_(\d+)\.m4a/);
+        if (match) {
+          recs.push({ date: new Date(parseInt(match[1])), meta: m });
+        }
+      }
+
+      let usage: ApiUsageStats | null = null;
+      try {
+        usage = await getApiUsageStats();
+      } catch (e) {
+        logWarn('stats', e);
+      }
+
+      setAllRecordings(recs);
+      setTplMap(map);
+      setApiUsage(usage);
+      setLoaded(true);
     } catch (err) {
       logWarn('stats', err);
-      // Fallback seguro — evita tela travada em "Carregando..." e propagação de erro
-      setStats({
-        totalRecordings: 0,
-        uniquePatients: 0,
-        withTranscript: 0,
-        withSummary: 0,
-        perDay: Array.from({ length: 7 }, () => ({ day: '', count: 0 })),
-        perTemplate: [],
-        topPatients: [],
-        apiUsage: null,
-      });
+      setAllRecordings([]);
+      setTplMap(new Map());
+      setApiUsage(null);
+      setLoaded(true);
     }
   };
 
   useFocusEffect(
     useCallback(() => {
-      loadStats();
+      loadData();
     }, [])
   );
 
+  const stats = loaded
+    ? computeStats(allRecordings, tplMap, period, apiUsage)
+    : null;
+
   if (!stats) {
     return (
-      <YStack f={1} bg={c.bgScreen} p="$4" gap="$3">
-        <XStack alignItems="center" gap="$3" mt="$6">
-          <Link href="/" asChild>
-            <Pressable accessibilityRole="button" accessibilityLabel="Voltar para gravação">
-              <ArrowLeft size={28} color={c.primary} />
-            </Pressable>
-          </Link>
+      <View style={{ flex: 1, backgroundColor: c.bgScreen, padding: 16 }}>
+        <YStack gap="$3" mt="$6">
           <Text fontSize={24} fontWeight="800" color={c.primary}>
             Estatísticas
           </Text>
-        </XStack>
-        <Text color={c.textSecondary} mt="$4">
-          Carregando...
-        </Text>
-      </YStack>
+          <Text color={c.textSecondary} mt="$4">
+            Carregando...
+          </Text>
+        </YStack>
+        <BottomTabBar />
+      </View>
     );
   }
 
   const maxDay = Math.max(1, ...stats.perDay.map((d) => d.count));
+  const totalCostBRL = stats.apiUsage ? stats.apiUsage.totalUSD * BRL_RATE : 0;
+  const costPerConsultation =
+    stats.totalRecordings > 0 && totalCostBRL > 0
+      ? totalCostBRL / stats.totalRecordings
+      : null;
 
   return (
-    <YStack f={1} bg={c.bgScreen}>
-      <YStack p="$4" gap="$3">
-        <XStack alignItems="center" gap="$3" mt="$6">
-          <Link href="/" asChild>
-            <Pressable accessibilityRole="button" accessibilityLabel="Voltar para gravação">
-              <ArrowLeft size={28} color={c.primary} />
-            </Pressable>
-          </Link>
+    <View style={{ flex: 1, backgroundColor: c.bgScreen }}>
+      <ScrollView
+        style={{ backgroundColor: c.bgScreen }}
+        contentContainerStyle={{ padding: 16, paddingBottom: 70, gap: 20 }}
+      >
+        {/* Header */}
+        <YStack gap="$3" mt="$6">
           <Text fontSize={24} fontWeight="800" color={c.primary}>
             Estatísticas
           </Text>
-        </XStack>
-      </YStack>
 
-      <ScrollView
-        style={{ backgroundColor: c.bgScreen }}
-        contentContainerStyle={{ padding: 16, paddingBottom: 60, gap: 20 }}
-      >
+          {/* Period selector chips */}
+          <XStack gap="$2" flexWrap="wrap">
+            {PERIOD_CHIPS.map(({ key, label }) => {
+              const active = period === key;
+              return (
+                <Pressable key={key} onPress={() => setPeriod(key)}>
+                  <View
+                    style={{
+                      paddingHorizontal: 12,
+                      paddingVertical: 6,
+                      borderRadius: 999,
+                      backgroundColor: active ? c.primary : c.bgCard,
+                      borderWidth: active ? 0 : 1,
+                      borderColor: c.border,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 12,
+                        fontWeight: '700',
+                        color: active ? c.textOnAccent : c.textSecondary,
+                      }}
+                    >
+                      {label}
+                    </Text>
+                  </View>
+                </Pressable>
+              );
+            })}
+          </XStack>
+        </YStack>
+
         {/* Cards 2x2 */}
         <XStack gap="$3">
           <StatCard
@@ -259,47 +407,33 @@ export default function StatsScreen() {
           />
         </XStack>
 
-        {/* Atividade últimos 7 dias */}
+        {/* Atividade chart */}
         <YStack gap="$2" mt="$2">
           <XStack alignItems="center" gap="$2">
             <Calendar size={18} color={c.textLabel} />
             <Text fontWeight="800" fontSize={13} color={c.textLabel}>
-              ATIVIDADE — ÚLTIMOS 7 DIAS
+              {period === 'week'
+                ? 'ATIVIDADE — ÚLTIMOS 7 DIAS'
+                : period === 'month'
+                ? 'ATIVIDADE — ÚLTIMOS 30 DIAS'
+                : period === 'year'
+                ? 'ATIVIDADE — ÚLTIMOS 12 MESES'
+                : 'ATIVIDADE — TODOS OS TEMPOS'}
             </Text>
           </XStack>
           <YStack gap="$2" mt="$1">
             {stats.perDay.map((d, i) => (
-              <XStack key={i} alignItems="center" gap="$3">
+              <XStack key={`${period}-${i}`} alignItems="center" gap="$3">
                 <Text fontSize={11} color={c.textSecondary} w={44}>
                   {d.day}
                 </Text>
-                <XStack
-                  f={1}
-                  h={22}
-                  bg={c.bgCard}
-                  borderRadius="$2"
-                  overflow="hidden"
-                  accessibilityRole="progressbar"
-                  accessibilityLabel={`${d.day}: ${d.count} gravação(ões)`}
-                  accessibilityValue={{ min: 0, max: maxDay, now: d.count }}
-                >
-                  <XStack
-                    h={22}
-                    bg={d.count > 0 ? c.primary : 'transparent'}
-                    w={`${(d.count / maxDay) * 100}%`}
-                  />
-                </XStack>
-                <Text
-                  fontSize={12}
-                  fontWeight="700"
-                  color={c.text}
-                  w={28}
-                  textAlign="right"
-                  accessibilityElementsHidden
-                  importantForAccessibility="no"
-                >
-                  {d.count}
-                </Text>
+                <AnimatedBar
+                  count={d.count}
+                  maxCount={maxDay}
+                  primaryColor={c.primary}
+                  bgCard={c.bgCard}
+                  textColor={c.textSecondary}
+                />
               </XStack>
             ))}
           </YStack>
@@ -421,6 +555,11 @@ export default function StatsScreen() {
                 {stats.apiUsage.totalCalls} chamada
                 {stats.apiUsage.totalCalls !== 1 ? 's' : ''} de API
               </Text>
+              {costPerConsultation !== null && (
+                <Text fontSize={12} color={c.primary} fontWeight="600">
+                  ≈ R${costPerConsultation.toFixed(2).replace('.', ',')} por consulta
+                </Text>
+              )}
             </YStack>
 
             {/* Breakdown por operação */}
@@ -550,6 +689,8 @@ export default function StatsScreen() {
           </YStack>
         )}
       </ScrollView>
-    </YStack>
+
+      <BottomTabBar />
+    </View>
   );
 }

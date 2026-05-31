@@ -6,10 +6,10 @@ import {
   TextInput,
   KeyboardAvoidingView,
   Platform,
+  View,
 } from 'react-native';
 import { YStack, XStack, Text } from 'tamagui';
 import {
-  ArrowLeft,
   Plus,
   Pencil,
   Trash2,
@@ -18,7 +18,8 @@ import {
   Sparkles,
   BookOpen,
 } from 'lucide-react-native';
-import { Link, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
+import { BottomTabBar } from '../components/BottomTabBar';
 import {
   BUILTIN_TEMPLATES,
 } from '../services/openai';
@@ -205,10 +206,12 @@ export default function TemplatesScreen() {
                 placeholderTextColor={c.textPlaceholder}
                 multiline
                 textAlignVertical="top"
+                maxLength={3000}
                 style={[inputStyle, { minHeight: 220, paddingTop: 12 }]}
                 accessibilityLabel="Prompt do sistema"
                 accessibilityHint="Instrução que a IA receberá ao processar gravações com este template"
               />
+              <Text color={c.textMuted} fontSize={11} textAlign="right">{systemPrompt.length}/3000 caracteres</Text>
             </YStack>
 
             <YStack
@@ -236,116 +239,114 @@ export default function TemplatesScreen() {
 
   // mode === 'list'
   return (
-    <YStack f={1} bg={c.bgScreen} p="$4" gap="$3">
-      <XStack alignItems="center" gap="$3" mt="$6">
-        <Link href="/" asChild>
-          <Pressable accessibilityRole="button" accessibilityLabel="Voltar para gravação">
-            <ArrowLeft size={28} color={c.primary} />
-          </Pressable>
-        </Link>
-        <Text fontSize={24} fontWeight="800" color={c.primary} f={1}>
-          Templates de IA
-        </Text>
-      </XStack>
-
-      <Pressable
-        onPress={startNew}
-        accessibilityRole="button"
-        accessibilityLabel="Criar novo template"
-      >
-        <XStack
-          bg={c.primary}
-          p="$3"
-          borderRadius="$3"
-          alignItems="center"
-          justifyContent="center"
-          gap="$2"
-        >
-          <Plus size={20} color={c.textOnAccent} />
-          <Text color={c.textOnAccent} fontWeight="700">
-            Novo template
+    <View style={{ flex: 1, backgroundColor: c.bgScreen }}>
+      <YStack f={1} bg={c.bgScreen} p="$4" gap="$3">
+        <XStack alignItems="center" gap="$3" mt="$6">
+          <Text fontSize={24} fontWeight="800" color={c.primary} f={1}>
+            Templates de IA
           </Text>
         </XStack>
-      </Pressable>
 
-      <ScrollView contentContainerStyle={{ gap: 12, paddingVertical: 12 }}>
-        {/* Seção: Custom */}
-        {customTemplates.length > 0 && (
-          <YStack gap="$2">
-            <Text color={c.textSecondary} fontSize={11} fontWeight="700">
-              SEUS TEMPLATES
+        <Pressable
+          onPress={startNew}
+          accessibilityRole="button"
+          accessibilityLabel="Criar novo template"
+        >
+          <XStack
+            bg={c.primary}
+            p="$3"
+            borderRadius="$3"
+            alignItems="center"
+            justifyContent="center"
+            gap="$2"
+          >
+            <Plus size={20} color={c.textOnAccent} />
+            <Text color={c.textOnAccent} fontWeight="700">
+              Novo template
             </Text>
-            {customTemplates.map((t) => (
+          </XStack>
+        </Pressable>
+
+        <ScrollView contentContainerStyle={{ gap: 12, paddingVertical: 12, paddingBottom: 70 }}>
+          {/* Seção: Custom */}
+          {customTemplates.length > 0 && (
+            <YStack gap="$2">
+              <Text color={c.textSecondary} fontSize={11} fontWeight="700">
+                SEUS TEMPLATES
+              </Text>
+              {customTemplates.map((t) => (
+                <YStack
+                  key={t.id}
+                  bg={c.bgPurpleSoft}
+                  p="$3"
+                  borderRadius="$3"
+                  borderWidth={1}
+                  borderColor={c.borderPurple}
+                  gap="$2"
+                >
+                  <XStack alignItems="center" gap="$2">
+                    <Sparkles size={16} color={c.secondary} />
+                    <Text fontWeight="700" fontSize={14} color={c.secondary} f={1}>
+                      {t.name}
+                    </Text>
+                    <Pressable
+                      onPress={() => startEdit(t)}
+                      hitSlop={8}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Editar template: ${t.name}`}
+                    >
+                      <Pencil size={18} color={c.secondary} />
+                    </Pressable>
+                    <Pressable
+                      onPress={() => confirmDelete(t)}
+                      hitSlop={8}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Excluir template: ${t.name}`}
+                    >
+                      <Trash2 size={18} color={c.accentRed} />
+                    </Pressable>
+                  </XStack>
+                  {t.description && (
+                    <Text fontSize={13} color={c.textSecondary}>
+                      {t.description}
+                    </Text>
+                  )}
+                </YStack>
+              ))}
+            </YStack>
+          )}
+
+          {/* Seção: Built-in */}
+          <YStack gap="$2" mt="$2">
+            <Text color={c.textSecondary} fontSize={11} fontWeight="700">
+              TEMPLATES PADRÃO
+            </Text>
+            {BUILTIN_TEMPLATES.map((t) => (
               <YStack
                 key={t.id}
-                bg={c.bgPurpleSoft}
+                bg={c.bgCard}
                 p="$3"
                 borderRadius="$3"
-                borderWidth={1}
-                borderColor={c.borderPurple}
                 gap="$2"
               >
                 <XStack alignItems="center" gap="$2">
-                  <Sparkles size={16} color={c.secondary} />
-                  <Text fontWeight="700" fontSize={14} color={c.secondary} f={1}>
+                  <BookOpen size={16} color={c.primary} />
+                  <Text fontWeight="700" fontSize={14} color={c.text} f={1}>
                     {t.name}
                   </Text>
-                  <Pressable
-                    onPress={() => startEdit(t)}
-                    hitSlop={8}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Editar template: ${t.name}`}
-                  >
-                    <Pencil size={18} color={c.secondary} />
-                  </Pressable>
-                  <Pressable
-                    onPress={() => confirmDelete(t)}
-                    hitSlop={8}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Excluir template: ${t.name}`}
-                  >
-                    <Trash2 size={18} color={c.accentRed} />
-                  </Pressable>
+                  <XStack bg={c.bgBlueSoft} px="$2" py={2} borderRadius={999} borderWidth={1} borderColor={c.borderBlue}>
+                    <Text fontSize={9} fontWeight="700" color={c.secondary}>PADRÃO</Text>
+                  </XStack>
                 </XStack>
-                {t.description && (
-                  <Text fontSize={13} color={c.textSecondary}>
-                    {t.description}
-                  </Text>
-                )}
+                <Text fontSize={13} color={c.textSecondary}>
+                  {t.description}
+                </Text>
               </YStack>
             ))}
           </YStack>
-        )}
-
-        {/* Seção: Built-in */}
-        <YStack gap="$2" mt="$2">
-          <Text color={c.textSecondary} fontSize={11} fontWeight="700">
-            TEMPLATES PADRÃO
-          </Text>
-          {BUILTIN_TEMPLATES.map((t) => (
-            <YStack
-              key={t.id}
-              bg={c.bgCard}
-              p="$3"
-              borderRadius="$3"
-              gap="$2"
-            >
-              <XStack alignItems="center" gap="$2">
-                <BookOpen size={16} color={c.primary} />
-                <Text fontWeight="700" fontSize={14} color={c.text} f={1}>
-                  {t.name}
-                </Text>
-                <Text fontSize={10} color={c.textSecondary} fontWeight="700">
-                  PADRÃO
-                </Text>
-              </XStack>
-              <Text fontSize={13} color={c.textSecondary}>
-                {t.description}
-              </Text>
-            </YStack>
-          ))}
-        </YStack>
-      </ScrollView>
-    </YStack>
+        </ScrollView>
+      </YStack>
+      <BottomTabBar />
+    </View>
   );
 }

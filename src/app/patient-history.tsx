@@ -38,6 +38,7 @@ import { getAllTemplates, PromptTemplate } from '../services/openai';
 import { formatDefaultName } from '../services/recordings';
 import { openShareMenu } from '../services/share';
 import { useColors } from '../context/ThemeContext';
+import { BottomTabBar } from '../components/BottomTabBar';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -242,6 +243,7 @@ export default function PatientHistoryScreen() {
   const color = avatarColor(patientName);
 
   return (
+    <View style={{ flex: 1, backgroundColor: c.bgScreen }}>
     <YStack f={1} bg={c.bgScreen}>
       {/* ── Header ── */}
       <YStack
@@ -377,7 +379,7 @@ export default function PatientHistoryScreen() {
         <FlatList
           data={recordings}
           keyExtractor={(r) => r.fileName}
-          contentContainerStyle={{ padding: 16, gap: 0 }}
+          contentContainerStyle={{ padding: 16, gap: 0, paddingBottom: 70 }}
           showsVerticalScrollIndicator={false}
           removeClippedSubviews
           initialNumToRender={6}
@@ -608,6 +610,8 @@ export default function PatientHistoryScreen() {
         />
       )}
     </YStack>
+    <BottomTabBar />
+    </View>
   );
 }
 

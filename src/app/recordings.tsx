@@ -32,6 +32,8 @@ import {
   User,
   Upload,
   CloudOff,
+  Mic,
+  MoreHorizontal,
 } from 'lucide-react-native';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -59,6 +61,7 @@ import { getDoctorProfile } from '../services/doctor';
 import { MermaidView } from '../components/MermaidView';
 import { AudioPlayerBar } from '../components/AudioPlayerBar';
 import { exportToEvoPad } from '../services/evopad-export';
+import { BottomTabBar } from '../components/BottomTabBar';
 import { useColors } from '../context/ThemeContext';
 import { logError, logWarn } from '../services/log';
 import {
@@ -198,8 +201,16 @@ function getSearchSnippet(text: string | null | undefined, query: string): strin
 export default function RecordingsScreen() {
   const c = useColors();
   const [recordings, setRecordings] = useState<Recording[]>([]);
+  const [loading, setLoading] = useState(true);
   const [playingUri, setPlayingUri] = useState<string | null>(null);
   const [exportingUri, setExportingUri] = useState<string | null>(null);
+
+  // Kebab (⋮) action menu
+  const [menuFile, setMenuFile] = useState<string | null>(null);
+  const [menuVisible, setMenuVisible] = useState(false);
+
+  // Sort order
+  const [sortDesc, setSortDesc] = useState(true);
 
   // Store global — transcrição e processamento correm em background,
   // independente do ciclo de vida deste componente.
@@ -383,6 +394,8 @@ export default function RecordingsScreen() {
         'Não foi possível ler a lista de gravações. Tente fechar e reabrir o app.\n\nDetalhe: ' +
           (err?.message ?? String(err))
       );
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -476,8 +489,13 @@ export default function RecordingsScreen() {
       });
     }
 
+    // Sort order — base list is descending (newest first); reverse for ascending.
+    if (!sortDesc) {
+      list = [...list].reverse();
+    }
+
     return list;
-  }, [recordings, searchQuery, patientFilter, selectedTemplates, selectedStatuses, dateRange, customDateStart, customDateEnd]);
+  }, [recordings, searchQuery, patientFilter, selectedTemplates, selectedStatuses, dateRange, customDateStart, customDateEnd, sortDesc]);
 
   const togglePlay = (uri: string) => {
     try {
@@ -773,13 +791,8 @@ export default function RecordingsScreen() {
   return (
     <YStack f={1} bg={c.bgScreen} p="$4" gap="$3">
       <XStack alignItems="center" gap="$3" mt="$6">
-        <Link href="/" asChild>
-          <Pressable accessibilityRole="button" accessibilityLabel="Voltar para gravação">
-            <ArrowLeft size={28} color={c.primary} />
-          </Pressable>
-        </Link>
         <Text fontSize={24} fontWeight="800" color={c.primary}>
-          Minhas Gravações
+          Gravações
         </Text>
       </XStack>
 
@@ -940,6 +953,21 @@ export default function RecordingsScreen() {
               <X size={18} color={c.textSecondary} />
             </Pressable>
           )}
+        </XStack>
+      )}
+
+      {recordings.length > 0 && (
+        <XStack alignItems="center" justifyContent="flex-end" px="$1">
+          <Pressable
+            onPress={() => setSortDesc((v) => !v)}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={sortDesc ? 'Ordenar: mais recentes primeiro' : 'Ordenar: mais antigas primeiro'}
+          >
+            <Text style={{ fontSize: 12, color: c.textSecondary, fontWeight: '700' }}>
+              {sortDesc ? '↓ Mais recentes' : '↑ Mais antigas'}
+            </Text>
+          </Pressable>
         </XStack>
       )}
 
@@ -1225,11 +1253,31 @@ export default function RecordingsScreen() {
         </>
       )}
 
-      {recordings.length === 0 ? (
+      {loading && recordings.length === 0 ? (
+        <YStack gap="$3" mt="$3">
+          {[0, 1, 2].map((i) => (
+            <YStack key={i} bg={c.bgCard} p="$3" borderRadius="$4" gap="$3" opacity={0.6}>
+              <XStack gap="$3" alignItems="center">
+                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: c.border }} />
+                <YStack f={1} gap="$2">
+                  <View style={{ height: 14, borderRadius: 6, backgroundColor: c.border, width: '50%' }} />
+                  <View style={{ height: 11, borderRadius: 6, backgroundColor: c.border, width: '80%' }} />
+                </YStack>
+              </XStack>
+            </YStack>
+          ))}
+        </YStack>
+      ) : recordings.length === 0 ? (
         <YStack f={1} alignItems="center" justifyContent="center">
-          <Text color={c.textMuted} fontSize={16}>
-            Nenhuma gravação ainda.
-          </Text>
+          <YStack bg={c.bgCard} p="$6" borderRadius="$4" alignItems="center" gap="$3" maxWidth={320}>
+            <Mic size={64} color={c.textPlaceholder} />
+            <Text color={c.textMuted} fontSize={18} fontWeight="700" textAlign="center">
+              Nenhuma gravação ainda.
+            </Text>
+            <Text color={c.textPlaceholder} fontSize={14} textAlign="center" lineHeight={20}>
+              Suas gravações aparecem aqui. Toque em Gravar para começar.
+            </Text>
+          </YStack>
         </YStack>
       ) : filteredRecordings.length === 0 ? (
         <YStack f={1} alignItems="center" justifyContent="center" gap="$2">
@@ -1251,7 +1299,7 @@ export default function RecordingsScreen() {
           <FlatList
             data={filteredRecordings}
             keyExtractor={(item) => item.fileName}
-            contentContainerStyle={{ gap: 12, paddingVertical: 12 }}
+            contentContainerStyle={{ gap: 12, paddingVertical: 12, paddingBottom: 70 }}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
             removeClippedSubviews
@@ -1267,8 +1315,6 @@ export default function RecordingsScreen() {
               const isEditing = editingFile === item.fileName;
               const displayName =
                 item.customName ?? formatDefaultName(item.createdAt);
-              const transcriptCopyKey = `transcript_${item.fileName}`;
-              const summaryCopyKey = `summary_${item.fileName}`;
 
               // Search snippet — show where match was found if not in the title
               const q = searchQuery.trim();
@@ -1478,44 +1524,30 @@ export default function RecordingsScreen() {
                       )}
                     </YStack>
 
-                    <Pressable
-                      onPress={() => handleExportPDF(item)}
-                      hitSlop={6}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Exportar PDF: ${displayName}`}
-                    >
-                      <FileDown size={22} color={c.accentBlue} />
-                    </Pressable>
-
-                    <Pressable
-                      onPress={() => handleExportMarkdown(item)}
-                      hitSlop={6}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Exportar Markdown: ${displayName}`}
-                    >
-                      <FileCode size={22} color={c.accentBlue} />
-                    </Pressable>
+                    {item.summary && (
+                      <XStack
+                        bg={c.bgGreenSoft}
+                        px="$2"
+                        py={4}
+                        borderRadius={999}
+                        alignItems="center"
+                      >
+                        <Text fontSize={11} fontWeight="700" color={c.primary}>
+                          ✓ Processado
+                        </Text>
+                      </XStack>
+                    )}
 
                     <Pressable
                       onPress={() => {
-                        Alert.alert(
-                          'Excluir gravação',
-                          `Tem certeza que deseja excluir "${displayName}"? Esta ação não pode ser desfeita.`,
-                          [
-                            { text: 'Cancelar', style: 'cancel' },
-                            {
-                              text: 'Excluir',
-                              style: 'destructive',
-                              onPress: () => handleDeleteRecording(item),
-                            },
-                          ]
-                        );
+                        setMenuFile(item.fileName);
+                        setMenuVisible(true);
                       }}
-                      hitSlop={6}
+                      hitSlop={8}
                       accessibilityRole="button"
-                      accessibilityLabel={`Excluir gravação: ${displayName}`}
+                      accessibilityLabel={`Mais ações: ${displayName}`}
                     >
-                      <Trash2 size={22} color={c.accentRed} />
+                      <MoreHorizontal size={24} color={c.textSecondary} />
                     </Pressable>
                   </XStack>
 
@@ -1572,34 +1604,6 @@ export default function RecordingsScreen() {
                         >
                           {getTemplateName(item.templateId)}
                         </Text>
-                        {copiedKey === summaryCopyKey ? (
-                          <Text fontSize={11} color={c.primary} fontWeight="700">
-                            Copiado!
-                          </Text>
-                        ) : (
-                          <Pressable
-                            onPress={() =>
-                              copyToClipboard(stripMarkers(item.summary!), summaryCopyKey)
-                            }
-                            hitSlop={8}
-                            accessibilityRole="button"
-                            accessibilityLabel="Copiar resumo"
-                          >
-                            <Copy size={16} color={c.secondary} />
-                          </Pressable>
-                        )}
-                        <Pressable
-                          onPress={() =>
-                            shareText(stripMarkers(item.summary!),
-                              `${getTemplateName(item.templateId)} - ${displayName}`
-                            )
-                          }
-                          hitSlop={8}
-                          accessibilityRole="button"
-                          accessibilityLabel="Compartilhar resumo"
-                        >
-                          <Share2 size={16} color={c.secondary} />
-                        </Pressable>
                       </XStack>
 
                       {item.templateId === 'mindmap' ? (
@@ -1609,98 +1613,6 @@ export default function RecordingsScreen() {
                           {stripMarkers(item.summary!)}
                         </Text>
                       )}
-
-                      <XStack gap="$2">
-                        <Pressable
-                          onPress={() => pickTemplateAndProcess(item)}
-                          disabled={isProcessing}
-                          style={{ flex: 1 }}
-                          accessibilityRole="button"
-                          accessibilityLabel={isProcessing ? 'Processando com IA…' : 'Reprocessar com IA'}
-                          accessibilityState={{ busy: isProcessing, disabled: isProcessing }}
-                        >
-                          <XStack
-                            bg={c.bgScreen}
-                            borderWidth={1}
-                            borderColor={c.borderPurple}
-                            p="$2"
-                            borderRadius="$3"
-                            alignItems="center"
-                            justifyContent="center"
-                            gap="$2"
-                            mt="$1"
-                          >
-                            {isProcessing ? (
-                              <>
-                                <ActivityIndicator color={c.secondary} size="small" />
-                                <Text
-                                  color={c.secondary}
-                                  fontWeight="700"
-                                  fontSize={12}
-                                >
-                                  Processando...
-                                </Text>
-                              </>
-                            ) : (
-                              <>
-                                <RefreshCw size={14} color={c.secondary} />
-                                <Text
-                                  color={c.secondary}
-                                  fontWeight="700"
-                                  fontSize={12}
-                                >
-                                  Reprocessar
-                                </Text>
-                              </>
-                            )}
-                          </XStack>
-                        </Pressable>
-
-                        <Pressable
-                          onPress={() => handleExportToEvoPad(item)}
-                          disabled={isProcessing || exportingUri === item.uri}
-                          style={{ flex: 1 }}
-                          accessibilityRole="button"
-                          accessibilityLabel={exportingUri === item.uri ? 'Exportando para EvoPad…' : 'Exportar para EvoPad'}
-                          accessibilityState={{ busy: exportingUri === item.uri, disabled: isProcessing || exportingUri === item.uri }}
-                        >
-                          <XStack
-                            bg={c.bgGreenSoft}
-                            borderWidth={1}
-                            borderColor={c.primary}
-                            p="$2"
-                            borderRadius="$3"
-                            alignItems="center"
-                            justifyContent="center"
-                            gap="$2"
-                            mt="$1"
-                          >
-                            {exportingUri === item.uri ? (
-                              <>
-                                <ActivityIndicator color={c.primary} size="small" />
-                                <Text
-                                  color={c.primary}
-                                  fontWeight="700"
-                                  fontSize={12}
-                                >
-                                  Exportando...
-                                </Text>
-                              </>
-                            ) : (
-                              <>
-                                <Upload size={14} color={c.primary} />
-                                <Text
-                                  color={c.primary}
-                                  fontWeight="700"
-                                  fontSize={12}
-                                >
-                                  Exportar EvoPad
-                                </Text>
-                              </>
-                            )}
-                          </XStack>
-                        </Pressable>
-                      </XStack>
                     </YStack>
                   )}
 
@@ -1723,46 +1635,6 @@ export default function RecordingsScreen() {
                         >
                           TRANSCRIÇÃO
                         </Text>
-                        {copiedKey === transcriptCopyKey ? (
-                          <Text fontSize={11} color={c.primary} fontWeight="700">
-                            Copiado!
-                          </Text>
-                        ) : (
-                          <Pressable
-                            onPress={() =>
-                              copyToClipboard(
-                                item.transcript!,
-                                transcriptCopyKey
-                              )
-                            }
-                            hitSlop={8}
-                            accessibilityRole="button"
-                            accessibilityLabel="Copiar transcrição"
-                          >
-                            <Copy size={16} color={c.primary} />
-                          </Pressable>
-                        )}
-                        <Pressable
-                          onPress={() =>
-                            shareText(
-                              item.transcript!,
-                              `Transcrição - ${displayName}`
-                            )
-                          }
-                          hitSlop={8}
-                          accessibilityRole="button"
-                          accessibilityLabel="Compartilhar transcrição"
-                        >
-                          <Share2 size={16} color={c.primary} />
-                        </Pressable>
-                        <Pressable
-                          onPress={() => openEditTranscriptModal(item)}
-                          hitSlop={8}
-                          accessibilityRole="button"
-                          accessibilityLabel="Editar transcrição"
-                        >
-                          <Pencil size={16} color={c.primary} />
-                        </Pressable>
                       </XStack>
                       <Text
                         fontSize={14}
@@ -2228,6 +2100,200 @@ export default function RecordingsScreen() {
           );
         })()}
       </Modal>
+
+      {/* Kebab (⋮) Action Menu */}
+      <Modal
+        visible={menuVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setMenuVisible(false)}
+      >
+        <Pressable style={{ flex: 1 }} onPress={() => setMenuVisible(false)} />
+        {(() => {
+          const item = filteredRecordings.find((r) => r.fileName === menuFile);
+          if (!item) {
+            return (
+              <View
+                style={{
+                  backgroundColor: c.bgCard,
+                  borderTopLeftRadius: 20,
+                  borderTopRightRadius: 20,
+                  padding: 20,
+                  gap: 12,
+                }}
+              />
+            );
+          }
+          const displayName = item.customName ?? formatDefaultName(item.createdAt);
+          const close = () => setMenuVisible(false);
+          return (
+            <View
+              style={{
+                backgroundColor: c.bgCard,
+                borderTopLeftRadius: 20,
+                borderTopRightRadius: 20,
+                padding: 20,
+                gap: 12,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontWeight: '700',
+                  color: c.textMuted,
+                  textTransform: 'uppercase',
+                  marginBottom: 4,
+                }}
+                numberOfLines={1}
+              >
+                {displayName}
+              </Text>
+
+              {item.transcript ? (
+                <Pressable
+                  onPress={() => {
+                    copyToClipboard(item.transcript!, `transcript_${item.fileName}`);
+                    close();
+                  }}
+                >
+                  <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                    <Copy size={20} color={c.primary} />
+                    <Text fontSize={15} color={c.text}>Copiar transcrição</Text>
+                  </XStack>
+                </Pressable>
+              ) : null}
+
+              {item.summary ? (
+                <Pressable
+                  onPress={() => {
+                    copyToClipboard(stripMarkers(item.summary!), `summary_${item.fileName}`);
+                    close();
+                  }}
+                >
+                  <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                    <Copy size={20} color={c.primary} />
+                    <Text fontSize={15} color={c.text}>Copiar resumo</Text>
+                  </XStack>
+                </Pressable>
+              ) : null}
+
+              {item.transcript ? (
+                <Pressable
+                  onPress={() => {
+                    close();
+                    setTimeout(() => openEditTranscriptModal(item), 300);
+                  }}
+                >
+                  <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                    <Pencil size={20} color={c.primary} />
+                    <Text fontSize={15} color={c.text}>Editar transcrição</Text>
+                  </XStack>
+                </Pressable>
+              ) : null}
+
+              {item.summary ? (
+                <Pressable
+                  onPress={() => {
+                    close();
+                    setTimeout(() => pickTemplateAndProcess(item), 300);
+                  }}
+                >
+                  <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                    <RefreshCw size={20} color={c.primary} />
+                    <Text fontSize={15} color={c.text}>Reprocessar com IA</Text>
+                  </XStack>
+                </Pressable>
+              ) : null}
+
+              <Pressable
+                onPress={() => {
+                  const content = item.summary ?? item.transcript ?? '';
+                  close();
+                  if (content.trim()) shareText(stripMarkers(content), displayName);
+                }}
+              >
+                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                  <Share2 size={20} color={c.primary} />
+                  <Text fontSize={15} color={c.text}>Compartilhar</Text>
+                </XStack>
+              </Pressable>
+
+              <Pressable
+                onPress={() => {
+                  close();
+                  handleExportPDF(item);
+                }}
+              >
+                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                  <FileDown size={20} color={c.primary} />
+                  <Text fontSize={15} color={c.text}>Exportar PDF</Text>
+                </XStack>
+              </Pressable>
+
+              <Pressable
+                onPress={() => {
+                  close();
+                  handleExportMarkdown(item);
+                }}
+              >
+                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                  <FileCode size={20} color={c.primary} />
+                  <Text fontSize={15} color={c.text}>Exportar Markdown</Text>
+                </XStack>
+              </Pressable>
+
+              <Pressable
+                onPress={() => {
+                  close();
+                  handleExportToEvoPad(item);
+                }}
+              >
+                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                  <Upload size={20} color={c.primary} />
+                  <Text fontSize={15} color={c.text}>Exportar para EvoPad</Text>
+                </XStack>
+              </Pressable>
+
+              <Pressable
+                onPress={() => {
+                  close();
+                  startEdit(item);
+                }}
+              >
+                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                  <Pencil size={20} color={c.primary} />
+                  <Text fontSize={15} color={c.text}>Renomear</Text>
+                </XStack>
+              </Pressable>
+
+              <Pressable
+                onPress={() => {
+                  close();
+                  Alert.alert(
+                    'Excluir gravação',
+                    `Tem certeza que deseja excluir "${displayName}"? Esta ação não pode ser desfeita.`,
+                    [
+                      { text: 'Cancelar', style: 'cancel' },
+                      {
+                        text: 'Excluir',
+                        style: 'destructive',
+                        onPress: () => handleDeleteRecording(item),
+                      },
+                    ]
+                  );
+                }}
+              >
+                <XStack gap={12} alignItems="center" py={12}>
+                  <Trash2 size={20} color={c.accentRed} />
+                  <Text fontSize={15} color={c.accentRed}>Excluir</Text>
+                </XStack>
+              </Pressable>
+            </View>
+          );
+        })()}
+      </Modal>
+
+      <BottomTabBar />
     </YStack>
   );
 }

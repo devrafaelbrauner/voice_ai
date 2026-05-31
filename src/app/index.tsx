@@ -1,64 +1,30 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Animated } from 'react-native';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { RecordButton } from '../components/RecordButton';
 import { WaveformLive } from '../components/WaveformLive';
 import { GlassBackground } from '../components/GlassBackground';
 import { VoiceAILogo } from '../components/VoiceAILogo';
+import { BottomTabBar } from '../components/BottomTabBar';
 import { Text, YStack, XStack } from 'tamagui';
 import {
-  List,
-  Settings as SettingsIcon,
   Pause,
   Play,
-  Users,
-  BarChart3,
   Trash2,
 } from 'lucide-react-native';
-import { Link, useRouter } from 'expo-router';
-import type { Href } from 'expo-router';
+import { useRouter } from 'expo-router';
 import { Alert, Linking, Pressable } from 'react-native';
 import { useColors } from '../context/ThemeContext';
 import { useThemeStore } from '../hooks/useTheme';
-import type { ColorPalette } from '../constants/theme';
 import { glass } from '../utils/glass';
-
-const IconButton = ({
-  href,
-  c,
-  isDark,
-  children,
-  accessibilityLabel,
-}: {
-  // Bug #13: usar tipo correto do expo-router em vez de `href as any`
-  href: Href;
-  c: ColorPalette;
-  isDark: boolean;
-  children: React.ReactNode;
-  accessibilityLabel: string;
-}) => (
-  <Link href={href} asChild>
-    <Pressable
-      accessibilityRole="link"
-      accessibilityLabel={accessibilityLabel}
-    >
-      <XStack
-        style={glass(0.55, 16, isDark)}
-        w={42}
-        h={42}
-        borderRadius={21}
-        alignItems="center"
-        justifyContent="center"
-      >
-        {children}
-      </XStack>
-    </Pressable>
-  </Link>
-);
 
 export default function RecordScreen() {
   const c = useColors();
   const isDark = useThemeStore((state) => state.isDark);
   const router = useRouter();
+  const [showSavedToast, setShowSavedToast] = useState(false);
+  const toastOpacity = useRef(new Animated.Value(0)).current;
+  const prevIsRecording = useRef(false);
   const {
     startRecording,
     stopRecording,
@@ -71,6 +37,19 @@ export default function RecordScreen() {
     duration,
     waveformData,
   } = useVoiceRecorder();
+
+  // Show "Gravação salva ✓" toast when recording stops
+  useEffect(() => {
+    if (prevIsRecording.current && !isRecording) {
+      setShowSavedToast(true);
+      Animated.sequence([
+        Animated.timing(toastOpacity, { toValue: 1, duration: 200, useNativeDriver: true }),
+        Animated.delay(1600),
+        Animated.timing(toastOpacity, { toValue: 0, duration: 200, useNativeDriver: true }),
+      ]).start(() => setShowSavedToast(false));
+    }
+    prevIsRecording.current = isRecording;
+  }, [isRecording]);
 
   const confirmDiscard = () => {
     Alert.alert(
@@ -135,17 +114,16 @@ export default function RecordScreen() {
 
   return (
     <GlassBackground>
-      <YStack f={1} p="$6" alignItems="center" justifyContent="center" gap="$6">
-        {/* Header: Logo (left) + IconButtons (right) — both glass */}
+      <YStack f={1} p="$6" alignItems="center" justifyContent="center" gap="$6" paddingBottom={70}>
+        {/* Header: Logo — decorativo, sem ação */}
         <XStack
           position="absolute"
           top={60}
           left={20}
           right={20}
           alignItems="center"
-          justifyContent="space-between"
+          justifyContent="flex-start"
         >
-          {/* Logo — decorativo, sem ação */}
           <XStack
             style={glass(0.48, 24, isDark)}
             px="$3"
@@ -163,21 +141,6 @@ export default function RecordScreen() {
             >
               VoiceAI
             </Text>
-          </XStack>
-
-          <XStack gap="$2">
-            <IconButton href="/stats" c={c} isDark={isDark} accessibilityLabel="Estatísticas">
-              <BarChart3 size={20} color={c.secondary} />
-            </IconButton>
-            <IconButton href="/patients" c={c} isDark={isDark} accessibilityLabel="Pacientes">
-              <Users size={20} color={c.primary} />
-            </IconButton>
-            <IconButton href="/recordings" c={c} isDark={isDark} accessibilityLabel="Minhas gravações">
-              <List size={20} color={c.primary} />
-            </IconButton>
-            <IconButton href="/settings" c={c} isDark={isDark} accessibilityLabel="Configurações">
-              <SettingsIcon size={20} color={c.textMuted} />
-            </IconButton>
           </XStack>
         </XStack>
 
@@ -240,6 +203,12 @@ export default function RecordScreen() {
           onPress={isRecording ? stopRecording : startRecording}
         />
 
+        {!isRecording && (
+          <Text color={c.textMuted} fontSize={13} fontWeight="500" letterSpacing={0.5}>
+            Toque para gravar
+          </Text>
+        )}
+
         {isRecording && (
           <XStack gap="$3" alignItems="center">
             <Pressable
@@ -294,6 +263,28 @@ export default function RecordScreen() {
           </XStack>
         )}
       </YStack>
+
+      {/* "Gravação salva ✓" toast */}
+      {showSavedToast && (
+        <Animated.View
+          style={{
+            position: 'absolute',
+            bottom: 72,
+            alignSelf: 'center',
+            opacity: toastOpacity,
+            backgroundColor: c.primary,
+            paddingHorizontal: 16,
+            paddingVertical: 8,
+            borderRadius: 20,
+          }}
+        >
+          <Text color={c.textOnAccent} fontWeight="700" fontSize={13}>
+            Gravação salva ✓
+          </Text>
+        </Animated.View>
+      )}
+
+      <BottomTabBar />
     </GlassBackground>
   );
 }

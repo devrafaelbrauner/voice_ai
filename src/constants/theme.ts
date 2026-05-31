@@ -94,6 +94,10 @@ export const Colors = {
     accentYellow: W.burnt,         // #c2410c — texto de aviso legível
     accentNavy: W.t800,            // #2e2b26
     accentGreenDark: W.t800,       // #2e2b26 — corpo do resumo (texto escuro legível)
+
+    // Semantic aliases — prefer these over the misleadingly-named "blue" keys in new code
+    accentWarm: W.burnt,           // #c2410c — same as accentBlue but correctly named
+    bgSoft: W.t100,                // same as bgBlueSoft but not blue-named
   },
   dark: {
     // ─── VoiceAI — Bootstrap Gray (Dark) ────────────────────────
@@ -144,8 +148,28 @@ export const Colors = {
     accentYellow: G[500],
     accentNavy: G[300],
     accentGreenDark: G[300],
+
+    accentWarm: G[300],
+    bgSoft: G[800],
   },
 } as const;
+
+// ─── Semantic aliases (for new code) ─────────────────────────────────────────
+// The keys below clarify the warm palette intent.
+// Use these in new components; the original keys are kept for backward compat.
+export const SemanticColors = {
+  // In light mode: accentBlue = burnt orange (#c2410c) — warm palette, NOT blue
+  // In dark mode: accentBlue = G[300] (light gray)
+  // Prefer using c.secondary for warm accent or c.accentOrange for vivid orange
+
+  // Heading styles
+  screenTitle: { fontSize: 24, fontWeight: '800' as const },
+  sectionLabel: { fontSize: 11, fontWeight: '700' as const, textTransform: 'uppercase' as const, letterSpacing: 1 },
+  cardTitle: { fontSize: 15, fontWeight: '700' as const },
+  cardSubtitle: { fontSize: 12 },
+} as const;
+
+export type SemanticColor = typeof SemanticColors;
 
 // Use a mapped type so both light and dark palettes satisfy ColorPalette
 // (literal string types in Colors.light are too narrow otherwise)

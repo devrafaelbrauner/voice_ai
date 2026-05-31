@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { TextInput, Pressable, Alert, ScrollView, Switch } from 'react-native';
+import { TextInput, Pressable, Alert, ScrollView, Switch, View } from 'react-native';
 import { YStack, XStack, Text } from 'tamagui';
 import {
-  ArrowLeft,
   Key,
   Check,
   Trash2,
@@ -27,6 +26,8 @@ import {
   Link2,
   WifiOff,
   Wifi,
+  Eye,
+  EyeOff,
 } from 'lucide-react-native';
 import { Link } from 'expo-router';
 import { getCurrentUser, signOut, onAuthChange, updatePassword } from '../services/auth';
@@ -67,9 +68,29 @@ import {
   EvoPadConfig,
 } from '../services/evopad-export';
 import { OnboardingModal } from '../components/OnboardingModal';
+import { BottomTabBar } from '../components/BottomTabBar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const ONBOARDING_SEEN_KEY = '@voice_ai_recorder/onboarding_seen/v1';
+
+function SectionHeader({ label }: { label: string }) {
+  const c = useColors();
+  return (
+    <Text
+      style={{
+        fontSize: 11,
+        fontWeight: '700',
+        color: c.textMuted,
+        textTransform: 'uppercase',
+        letterSpacing: 1,
+        marginTop: 24,
+        marginBottom: 8,
+      }}
+    >
+      {label}
+    </Text>
+  );
+}
 
 export default function SettingsScreen() {
   const { isDark, toggleTheme } = useTheme();
@@ -93,6 +114,7 @@ export default function SettingsScreen() {
 
   const [key, setKey] = useState('');
   const [keySaved, setKeySaved] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
   const [doctor, setDoctor] = useState<DoctorProfile>({
     name: '',
     title: '',
@@ -104,6 +126,7 @@ export default function SettingsScreen() {
     professionalEnabled: false,
   });
   const [doctorSaved, setDoctorSaved] = useState(false);
+  const [profileSaved, setProfileSaved] = useState(false);
   const [model, setModelState] = useState<OpenAIModel>('gpt-4o-mini');
   const [user, setUser] = useState<User | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
@@ -313,15 +336,16 @@ export default function SettingsScreen() {
     setTimeout(() => setDoctorSaved(false), 2000);
   };
 
+  const handleAutoSaveProfile = async () => {
+    await setDoctorProfile(doctor);
+    setProfileSaved(true);
+    setTimeout(() => setProfileSaved(false), 2000);
+  };
+
   return (
-    <YStack f={1} bg={c.bgScreen}>
+    <View style={{ flex: 1, backgroundColor: c.bgScreen }}>
       <YStack p="$4" gap="$3">
         <XStack alignItems="center" gap="$3" mt="$6">
-          <Link href="/" asChild>
-            <Pressable accessibilityRole="button" accessibilityLabel="Voltar para gravação">
-              <ArrowLeft size={28} color={c.primary} />
-            </Pressable>
-          </Link>
           <Text fontSize={24} fontWeight="800" color={c.primary}>
             Configurações
           </Text>
@@ -330,249 +354,12 @@ export default function SettingsScreen() {
 
       <ScrollView
         style={{ flex: 1, backgroundColor: c.bgScreen }}
-        contentContainerStyle={{ padding: 16, paddingBottom: 60, gap: 24 }}
+        contentContainerStyle={{ padding: 16, paddingBottom: 70, gap: 24 }}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Perfil Pessoal */}
-        <YStack gap="$3">
-          <XStack alignItems="center" gap="$2">
-            <UserCircle size={20} color={c.accentBlue} />
-            <Text fontSize={16} fontWeight="700" color={c.text}>
-              Perfil Pessoal
-            </Text>
-          </XStack>
-          <Text color={c.textSecondary} fontSize={12}>
-            Informações básicas usadas em todas as gravações.
-          </Text>
 
-          <YStack gap="$2">
-            <Text fontWeight="700" fontSize={12} color={c.textLabel}>
-              Nome completo
-            </Text>
-            <TextInput
-              value={doctor.name}
-              onChangeText={(v) => setDoctor({ ...doctor, name: v })}
-              placeholder="Seu nome"
-              placeholderTextColor={c.textPlaceholder}
-              style={inputStyle}
-            />
-          </YStack>
-
-          <YStack gap="$2">
-            <Text fontWeight="700" fontSize={12} color={c.textLabel}>
-              Telefone
-            </Text>
-            <TextInput
-              value={doctor.phone}
-              onChangeText={(v) => setDoctor({ ...doctor, phone: v })}
-              placeholder="(85) 99999-9999"
-              placeholderTextColor={c.textPlaceholder}
-              keyboardType="phone-pad"
-              style={inputStyle}
-            />
-          </YStack>
-        </YStack>
-
-        {/* Perfil Profissional */}
-        <YStack gap="$3">
-          <XStack alignItems="center" gap="$2">
-            <Briefcase size={20} color={c.secondary} />
-            <Text fontSize={16} fontWeight="700" color={c.text}>
-              Perfil Profissional
-            </Text>
-          </XStack>
-          <Text color={c.textSecondary} fontSize={12}>
-            Opcional. Ative para incluir dados profissionais nos PDFs e exportações para o EvoPad.
-          </Text>
-
-          <XStack
-            bg={c.bgSubtle}
-            borderWidth={1}
-            borderColor={c.border}
-            p="$3"
-            borderRadius="$3"
-            alignItems="center"
-            justifyContent="space-between"
-            gap="$3"
-          >
-            <YStack f={1} gap="$1">
-              <Text fontWeight="700" fontSize={14} color={c.text}>
-                Habilitar perfil profissional
-              </Text>
-              <Text fontSize={12} color={c.textSecondary}>
-                {doctor.professionalEnabled
-                  ? 'Perfil profissional ativo (Médico)'
-                  : 'Apenas perfil pessoal'}
-              </Text>
-            </YStack>
-            <Switch
-              value={doctor.professionalEnabled}
-              onValueChange={(v) =>
-                setDoctor({ ...doctor, professionalEnabled: v })
-              }
-              trackColor={{ false: c.borderInput, true: c.secondary }}
-              thumbColor={doctor.professionalEnabled ? c.secondary : c.bgCard}
-              accessibilityLabel="Habilitar perfil profissional"
-              accessibilityHint="Inclui dados de médico nos PDFs e exportações"
-            />
-          </XStack>
-
-          {doctor.professionalEnabled && (
-            <YStack
-              gap="$3"
-              bg={c.bgPurpleSoft}
-              p="$3"
-              borderRadius="$3"
-              borderWidth={1}
-              borderColor={c.borderPurple}
-            >
-              <XStack alignItems="center" gap="$2">
-                <Stethoscope size={18} color={c.secondary} />
-                <Text fontWeight="700" fontSize={13} color={c.secondary}>
-                  DADOS DE MÉDICO
-                </Text>
-              </XStack>
-
-              <YStack gap="$2">
-                <Text fontWeight="700" fontSize={12} color={c.textLabel}>
-                  Cargo / Especialidade
-                </Text>
-                <TextInput
-                  value={doctor.title}
-                  onChangeText={(v) => setDoctor({ ...doctor, title: v })}
-                  placeholder="Médico"
-                  placeholderTextColor={c.textPlaceholder}
-                  style={inputStyle}
-                />
-              </YStack>
-
-              <XStack gap="$2">
-                <YStack f={2} gap="$2">
-                  <Text fontWeight="700" fontSize={12} color={c.textLabel}>
-                    CRM (número)
-                  </Text>
-                  <TextInput
-                    value={doctor.crmNumber}
-                    onChangeText={(v) =>
-                      setDoctor({
-                        ...doctor,
-                        crmNumber: v.replace(/[^0-9]/g, ''),
-                      })
-                    }
-                    placeholder="17950"
-                    placeholderTextColor={c.textPlaceholder}
-                    keyboardType="number-pad"
-                    style={inputStyle}
-                  />
-                </YStack>
-                <YStack f={1} gap="$2">
-                  <Text fontWeight="700" fontSize={12} color={c.textLabel}>
-                    UF
-                  </Text>
-                  <TextInput
-                    value={doctor.crmUF}
-                    onChangeText={(v) =>
-                      setDoctor({
-                        ...doctor,
-                        crmUF: v.toUpperCase().slice(0, 2),
-                      })
-                    }
-                    placeholder="CE"
-                    placeholderTextColor={c.textPlaceholder}
-                    autoCapitalize="characters"
-                    maxLength={2}
-                    style={inputStyle}
-                  />
-                </YStack>
-              </XStack>
-
-              <YStack gap="$2">
-                <Text fontWeight="700" fontSize={12} color={c.textLabel}>
-                  Endereço profissional
-                </Text>
-                <TextInput
-                  value={doctor.address}
-                  onChangeText={(v) => setDoctor({ ...doctor, address: v })}
-                  placeholder="Rua das Flores, 123, Sala 5, Aldeota"
-                  placeholderTextColor={c.textPlaceholder}
-                  style={inputStyle}
-                  multiline
-                />
-              </YStack>
-
-              <YStack gap="$2">
-                <Text fontWeight="700" fontSize={12} color={c.textLabel}>
-                  Cidade
-                </Text>
-                <TextInput
-                  value={doctor.city}
-                  onChangeText={(v) => setDoctor({ ...doctor, city: v })}
-                  placeholder="Fortaleza"
-                  placeholderTextColor={c.textPlaceholder}
-                  style={inputStyle}
-                />
-              </YStack>
-            </YStack>
-          )}
-
-          <Pressable
-            onPress={handleSaveDoctor}
-            accessibilityRole="button"
-            accessibilityLabel={doctorSaved ? 'Perfil salvo' : 'Salvar perfil'}
-            accessibilityHint="Salva nome, CRM e dados profissionais"
-          >
-            <XStack
-              bg={c.accentBlue}
-              p="$3"
-              borderRadius="$3"
-              alignItems="center"
-              justifyContent="center"
-              gap="$2"
-            >
-              <Check size={18} color={c.textOnAccent} />
-              <Text color={c.textOnAccent} fontWeight="700">
-                {doctorSaved ? 'Perfil salvo!' : 'Salvar perfil'}
-              </Text>
-            </XStack>
-          </Pressable>
-        </YStack>
-
-        {/* Aparência */}
-        <YStack gap="$3">
-          <XStack alignItems="center" gap="$2">
-            <Moon size={20} color={c.textSecondary} />
-            <Text fontSize={16} fontWeight="700" color={c.text}>
-              Aparência
-            </Text>
-          </XStack>
-          <XStack
-            bg={c.bgSubtle}
-            borderWidth={1}
-            borderColor={c.border}
-            p="$3"
-            borderRadius="$3"
-            alignItems="center"
-            justifyContent="space-between"
-            gap="$3"
-          >
-            <YStack f={1} gap="$1">
-              <Text fontWeight="700" fontSize={14} color={c.text}>
-                Modo Escuro
-              </Text>
-              <Text fontSize={12} color={c.textSecondary}>
-                {isDark ? 'Tema escuro ativado' : 'Tema claro ativado'}
-              </Text>
-            </YStack>
-            <Switch
-              value={isDark}
-              onValueChange={() => toggleTheme()}
-              trackColor={{ false: c.borderInput, true: c.primary }}
-              thumbColor={isDark ? c.primary : c.bgCard}
-              accessibilityLabel="Modo escuro"
-              accessibilityHint={isDark ? 'Desativar tema escuro' : 'Ativar tema escuro'}
-            />
-          </XStack>
-        </YStack>
+        {/* SEÇÃO: CONTA NA NUVEM */}
+        <SectionHeader label="Conta" />
 
         {/* Conta na Nuvem */}
         <YStack gap="$3">
@@ -702,6 +489,316 @@ export default function SettingsScreen() {
           )}
         </YStack>
 
+        {/* SEÇÃO: BACKUP */}
+        <SectionHeader label="Backup" />
+
+        {/* Backup & Exportação */}
+        <YStack
+          bg={c.bgCard}
+          p="$3"
+          borderRadius="$3"
+          gap="$3"
+        >
+          <XStack alignItems="center" gap="$2">
+            <Download size={20} color={c.accentBlue} />
+            <Text fontWeight="700" fontSize={14} color={c.text}>
+              Backup & Exportação
+            </Text>
+          </XStack>
+
+          <Text fontSize={12} color={c.textSecondary} lineHeight={18}>
+            Gere um arquivo JSON com todas as suas gravações, transcrições,
+            resumos, dados profissionais e templates personalizados.
+            Útil para portabilidade (LGPD Art. 18) ou trocar de aparelho.
+          </Text>
+
+          {backupSummary && (
+            <XStack
+              bg={c.bgBlueSoft}
+              borderWidth={1}
+              borderColor={c.accentBlue}
+              borderRadius="$3"
+              px="$3"
+              py="$2"
+              alignItems="center"
+              gap="$2"
+            >
+              <FileText size={14} color={c.accentBlue} />
+              <Text fontSize={12} color={c.accentNavy} flex={1}>
+                {backupSummary}
+              </Text>
+            </XStack>
+          )}
+
+          <Pressable
+            onPress={handleExportBackup}
+            disabled={exportingBackup}
+            accessibilityRole="button"
+            accessibilityLabel={exportingBackup ? 'Gerando backup…' : 'Exportar backup em JSON'}
+            accessibilityHint="Gera um arquivo com todas as gravações e dados para exportação"
+            accessibilityState={{ busy: exportingBackup, disabled: exportingBackup }}
+          >
+            <XStack
+              bg={exportingBackup ? c.bgSubtle : c.accentBlue}
+              borderRadius="$3"
+              px="$3"
+              py="$3"
+              alignItems="center"
+              justifyContent="center"
+              gap="$2"
+              opacity={exportingBackup ? 0.6 : 1}
+            >
+              <Download size={16} color={exportingBackup ? c.textSecondary : c.textOnAccent} />
+              <Text
+                fontSize={13}
+                color={exportingBackup ? c.textSecondary : c.textOnAccent}
+                fontWeight="700"
+              >
+                {exportingBackup ? 'Gerando backup…' : 'Exportar backup (JSON)'}
+              </Text>
+            </XStack>
+          </Pressable>
+        </YStack>
+
+        {/* SEÇÃO: PERFIL */}
+        <SectionHeader label="Perfil" />
+
+        {/* Perfil Pessoal */}
+        <YStack gap="$3">
+          <XStack alignItems="center" gap="$2">
+            <UserCircle size={20} color={c.accentBlue} />
+            <Text fontSize={16} fontWeight="700" color={c.text}>
+              Perfil Pessoal
+            </Text>
+            {profileSaved && (
+              <Text style={{ fontSize: 12, color: c.secondary, marginLeft: 8 }}>Salvo ✓</Text>
+            )}
+          </XStack>
+          <Text color={c.textSecondary} fontSize={12}>
+            Informações básicas usadas em todas as gravações. Salvas automaticamente ao sair do campo.
+          </Text>
+
+          <YStack gap="$2">
+            <Text fontWeight="700" fontSize={12} color={c.textLabel}>
+              Nome completo
+            </Text>
+            <TextInput
+              value={doctor.name}
+              onChangeText={(v) => setDoctor({ ...doctor, name: v })}
+              onBlur={handleAutoSaveProfile}
+              placeholder="Seu nome"
+              placeholderTextColor={c.textPlaceholder}
+              style={inputStyle}
+            />
+          </YStack>
+
+          <YStack gap="$2">
+            <Text fontWeight="700" fontSize={12} color={c.textLabel}>
+              Telefone
+            </Text>
+            <TextInput
+              value={doctor.phone}
+              onChangeText={(v) => setDoctor({ ...doctor, phone: v })}
+              onBlur={handleAutoSaveProfile}
+              placeholder="(85) 99999-9999"
+              placeholderTextColor={c.textPlaceholder}
+              keyboardType="phone-pad"
+              style={inputStyle}
+            />
+          </YStack>
+        </YStack>
+
+        {/* Perfil Profissional */}
+        <YStack gap="$3">
+          <XStack alignItems="center" gap="$2">
+            <Briefcase size={20} color={c.secondary} />
+            <Text fontSize={16} fontWeight="700" color={c.text}>
+              Perfil Profissional
+            </Text>
+          </XStack>
+          <Text color={c.textSecondary} fontSize={12}>
+            Opcional. Ative para incluir dados profissionais nos PDFs e exportações para o EvoPad.
+          </Text>
+
+          <XStack
+            bg={c.bgSubtle}
+            borderWidth={1}
+            borderColor={c.border}
+            p="$3"
+            borderRadius="$3"
+            alignItems="center"
+            justifyContent="space-between"
+            gap="$3"
+          >
+            <YStack f={1} gap="$1">
+              <Text fontWeight="700" fontSize={14} color={c.text}>
+                Habilitar perfil profissional
+              </Text>
+              <Text fontSize={12} color={c.textSecondary}>
+                {doctor.professionalEnabled
+                  ? 'Perfil profissional ativo (Médico)'
+                  : 'Apenas perfil pessoal'}
+              </Text>
+            </YStack>
+            <Switch
+              value={doctor.professionalEnabled}
+              onValueChange={(v) =>
+                setDoctor({ ...doctor, professionalEnabled: v })
+              }
+              trackColor={{ false: c.borderInput, true: c.secondary }}
+              thumbColor={doctor.professionalEnabled ? c.secondary : c.bgCard}
+              accessibilityLabel="Habilitar perfil profissional"
+              accessibilityHint="Inclui dados de médico nos PDFs e exportações"
+            />
+          </XStack>
+
+          {doctor.professionalEnabled && (
+            <YStack
+              gap="$3"
+              bg={c.bgPurpleSoft}
+              p="$3"
+              borderRadius="$3"
+              borderWidth={1}
+              borderColor={c.borderPurple}
+            >
+              <XStack alignItems="center" gap="$2">
+                <Stethoscope size={18} color={c.secondary} />
+                <Text fontWeight="700" fontSize={13} color={c.secondary}>
+                  DADOS DE MÉDICO
+                </Text>
+              </XStack>
+
+              <YStack gap="$2">
+                <Text fontWeight="700" fontSize={12} color={c.textLabel}>
+                  Cargo / Especialidade
+                </Text>
+                <TextInput
+                  value={doctor.title}
+                  onChangeText={(v) => setDoctor({ ...doctor, title: v })}
+                  onBlur={handleAutoSaveProfile}
+                  placeholder="Médico"
+                  placeholderTextColor={c.textPlaceholder}
+                  style={inputStyle}
+                />
+              </YStack>
+
+              <XStack gap="$2">
+                <YStack f={2} gap="$2">
+                  <Text fontWeight="700" fontSize={12} color={c.textLabel}>
+                    CRM (número)
+                  </Text>
+                  <TextInput
+                    value={doctor.crmNumber}
+                    onChangeText={(v) =>
+                      setDoctor({
+                        ...doctor,
+                        crmNumber: v.replace(/[^0-9]/g, ''),
+                      })
+                    }
+                    onBlur={handleAutoSaveProfile}
+                    placeholder="17950"
+                    placeholderTextColor={c.textPlaceholder}
+                    keyboardType="number-pad"
+                    style={inputStyle}
+                  />
+                </YStack>
+                <YStack f={1} gap="$2">
+                  <Text fontWeight="700" fontSize={12} color={c.textLabel}>
+                    UF
+                  </Text>
+                  <TextInput
+                    value={doctor.crmUF}
+                    onChangeText={(v) =>
+                      setDoctor({
+                        ...doctor,
+                        crmUF: v.toUpperCase().slice(0, 2),
+                      })
+                    }
+                    onBlur={handleAutoSaveProfile}
+                    placeholder="CE"
+                    placeholderTextColor={c.textPlaceholder}
+                    autoCapitalize="characters"
+                    maxLength={2}
+                    style={inputStyle}
+                  />
+                </YStack>
+              </XStack>
+
+              <YStack gap="$2">
+                <Text fontWeight="700" fontSize={12} color={c.textLabel}>
+                  Endereço profissional
+                </Text>
+                <TextInput
+                  value={doctor.address}
+                  onChangeText={(v) => setDoctor({ ...doctor, address: v })}
+                  onBlur={handleAutoSaveProfile}
+                  placeholder="Rua das Flores, 123, Sala 5, Aldeota"
+                  placeholderTextColor={c.textPlaceholder}
+                  style={inputStyle}
+                  multiline
+                />
+              </YStack>
+
+              <YStack gap="$2">
+                <Text fontWeight="700" fontSize={12} color={c.textLabel}>
+                  Cidade
+                </Text>
+                <TextInput
+                  value={doctor.city}
+                  onChangeText={(v) => setDoctor({ ...doctor, city: v })}
+                  onBlur={handleAutoSaveProfile}
+                  placeholder="Fortaleza"
+                  placeholderTextColor={c.textPlaceholder}
+                  style={inputStyle}
+                />
+              </YStack>
+            </YStack>
+          )}
+        </YStack>
+
+        {/* SEÇÃO: APARÊNCIA */}
+        <SectionHeader label="Aparência" />
+
+        {/* Aparência */}
+        <YStack gap="$3">
+          <XStack alignItems="center" gap="$2">
+            <Moon size={20} color={c.textSecondary} />
+            <Text fontSize={16} fontWeight="700" color={c.text}>
+              Aparência
+            </Text>
+          </XStack>
+          <XStack
+            bg={c.bgSubtle}
+            borderWidth={1}
+            borderColor={c.border}
+            p="$3"
+            borderRadius="$3"
+            alignItems="center"
+            justifyContent="space-between"
+            gap="$3"
+          >
+            <YStack f={1} gap="$1">
+              <Text fontWeight="700" fontSize={14} color={c.text}>
+                Modo Escuro
+              </Text>
+              <Text fontSize={12} color={c.textSecondary}>
+                {isDark ? 'Tema escuro ativado' : 'Tema claro ativado'}
+              </Text>
+            </YStack>
+            <Switch
+              value={isDark}
+              onValueChange={() => toggleTheme()}
+              trackColor={{ false: c.borderInput, true: c.primary }}
+              thumbColor={isDark ? c.primary : c.bgCard}
+              accessibilityLabel="Modo escuro"
+              accessibilityHint={isDark ? 'Desativar tema escuro' : 'Ativar tema escuro'}
+            />
+          </XStack>
+        </YStack>
+
+        {/* SEÇÃO: MODELO DE IA */}
+        <SectionHeader label="Modelo de IA" />
+
         {/* Modelo de IA */}
         <YStack gap="$3">
           <XStack alignItems="center" gap="$2">
@@ -773,8 +870,10 @@ export default function SettingsScreen() {
               </Pressable>
             );
           })}
-
         </YStack>
+
+        {/* SEÇÃO: API KEYS */}
+        <SectionHeader label="API Keys" />
 
         {/* Modo OpenAI */}
         <YStack gap="$3">
@@ -844,7 +943,7 @@ export default function SettingsScreen() {
           )}
         </YStack>
 
-        {/* API Key (usada só em modo direto) */}
+        {/* API Key OpenAI */}
         <YStack gap="$3">
           <XStack alignItems="center" gap="$2">
             <Key size={20} color={c.textLabel} />
@@ -862,16 +961,32 @@ export default function SettingsScreen() {
             dispositivo, criptografada. Só é usada quando o proxy seguro está
             indisponível ou desativado.
           </Text>
-          <TextInput
-            value={key}
-            onChangeText={setKey}
-            placeholder="sk-..."
-            placeholderTextColor={c.textPlaceholder}
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
-            style={inputStyle}
-          />
+          <XStack
+            alignItems="center"
+            borderWidth={1}
+            borderColor={c.borderInput}
+            borderRadius={8}
+            backgroundColor={c.bgInput}
+            paddingRight={12}
+          >
+            <TextInput
+              value={key}
+              onChangeText={setKey}
+              placeholder="sk-..."
+              placeholderTextColor={c.textPlaceholder}
+              secureTextEntry={!showApiKey}
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={[inputStyle, { flex: 1, borderWidth: 0, borderRadius: 0 }]}
+            />
+            <Pressable onPress={() => setShowApiKey((v) => !v)} hitSlop={8}>
+              {showApiKey ? (
+                <EyeOff size={18} color={c.textMuted} />
+              ) : (
+                <Eye size={18} color={c.textMuted} />
+              )}
+            </Pressable>
+          </XStack>
           <XStack gap="$2">
             <Pressable
               onPress={handleSaveKey}
@@ -986,81 +1101,8 @@ export default function SettingsScreen() {
           </XStack>
         </YStack>
 
-        {/* Links */}
-        <Link href="/stats" asChild>
-          <Pressable accessibilityRole="link" accessibilityLabel="Estatísticas — ver dashboard com gráficos e métricas">
-            <XStack
-              bg={c.bgCard}
-              p="$3"
-              borderRadius="$3"
-              alignItems="center"
-              gap="$3"
-            >
-              <BarChart3 size={20} color={c.accentOrange} />
-              <YStack f={1}>
-                <Text fontWeight="700" fontSize={14} color={c.text}>
-                  Estatísticas
-                </Text>
-                <Text fontSize={12} color={c.textSecondary}>
-                  Dashboard com gráficos e métricas
-                </Text>
-              </YStack>
-              <ChevronRight size={20} color={c.textPlaceholder} />
-            </XStack>
-          </Pressable>
-        </Link>
-
-        <Link href="/templates" asChild>
-          <Pressable accessibilityRole="link" accessibilityLabel="Templates de IA — criar e editar prompts customizados">
-            <XStack
-              bg={c.bgCard}
-              p="$3"
-              borderRadius="$3"
-              alignItems="center"
-              gap="$3"
-            >
-              <Sparkles size={20} color={c.secondary} />
-              <YStack f={1}>
-                <Text fontWeight="700" fontSize={14} color={c.text}>
-                  Templates de IA
-                </Text>
-                <Text fontSize={12} color={c.textSecondary}>
-                  Crie e edite prompts customizados
-                </Text>
-              </YStack>
-              <ChevronRight size={20} color={c.textPlaceholder} />
-            </XStack>
-          </Pressable>
-        </Link>
-
-        {/* Tutorial */}
-        <Pressable
-          onPress={async () => {
-            await AsyncStorage.removeItem(ONBOARDING_SEEN_KEY);
-            setShowOnboarding(true);
-          }}
-          accessibilityRole="button"
-          accessibilityLabel="Ver tutorial — rever o guia de introdução ao app"
-        >
-          <XStack
-            bg={c.bgCard}
-            p="$3"
-            borderRadius="$3"
-            alignItems="center"
-            gap="$3"
-          >
-            <HelpCircle size={20} color={c.primary} />
-            <YStack f={1}>
-              <Text fontWeight="700" fontSize={14} color={c.text}>
-                Ver tutorial
-              </Text>
-              <Text fontSize={12} color={c.textSecondary}>
-                Rever o guia de introdução ao app
-              </Text>
-            </YStack>
-            <ChevronRight size={20} color={c.textPlaceholder} />
-          </XStack>
-        </Pressable>
+        {/* SEÇÃO: EVOPAD */}
+        <SectionHeader label="EvoPad" />
 
         {/* EvoPad — Integração local */}
         <YStack bg={c.bgCard} p="$3" borderRadius="$3" gap="$3">
@@ -1259,73 +1301,87 @@ export default function SettingsScreen() {
           </Text>
         </YStack>
 
-        {/* Backup & Exportação */}
-        <YStack
-          bg={c.bgCard}
-          p="$3"
-          borderRadius="$3"
-          gap="$3"
-        >
-          <XStack alignItems="center" gap="$2">
-            <Download size={20} color={c.accentBlue} />
-            <Text fontWeight="700" fontSize={14} color={c.text}>
-              Backup & Exportação
-            </Text>
-          </XStack>
+        {/* SEÇÃO: FERRAMENTAS */}
+        <SectionHeader label="Ferramentas" />
 
-          <Text fontSize={12} color={c.textSecondary} lineHeight={18}>
-            Gere um arquivo JSON com todas as suas gravações, transcrições,
-            resumos, dados profissionais e templates personalizados.
-            Útil para portabilidade (LGPD Art. 18) ou trocar de aparelho.
-          </Text>
-
-          {backupSummary && (
+        {/* Links */}
+        <Link href="/stats" asChild>
+          <Pressable accessibilityRole="link" accessibilityLabel="Estatísticas — ver dashboard com gráficos e métricas">
             <XStack
-              bg={c.bgBlueSoft}
-              borderWidth={1}
-              borderColor={c.accentBlue}
+              bg={c.bgCard}
+              p="$3"
               borderRadius="$3"
-              px="$3"
-              py="$2"
               alignItems="center"
-              gap="$2"
+              gap="$3"
             >
-              <FileText size={14} color={c.accentBlue} />
-              <Text fontSize={12} color={c.accentNavy} flex={1}>
-                {backupSummary}
-              </Text>
-            </XStack>
-          )}
-
-          <Pressable
-            onPress={handleExportBackup}
-            disabled={exportingBackup}
-            accessibilityRole="button"
-            accessibilityLabel={exportingBackup ? 'Gerando backup…' : 'Exportar backup em JSON'}
-            accessibilityHint="Gera um arquivo com todas as gravações e dados para exportação"
-            accessibilityState={{ busy: exportingBackup, disabled: exportingBackup }}
-          >
-            <XStack
-              bg={exportingBackup ? c.bgSubtle : c.accentBlue}
-              borderRadius="$3"
-              px="$3"
-              py="$3"
-              alignItems="center"
-              justifyContent="center"
-              gap="$2"
-              opacity={exportingBackup ? 0.6 : 1}
-            >
-              <Download size={16} color={exportingBackup ? c.textSecondary : c.textOnAccent} />
-              <Text
-                fontSize={13}
-                color={exportingBackup ? c.textSecondary : c.textOnAccent}
-                fontWeight="700"
-              >
-                {exportingBackup ? 'Gerando backup…' : 'Exportar backup (JSON)'}
-              </Text>
+              <BarChart3 size={20} color={c.accentOrange} />
+              <YStack f={1}>
+                <Text fontWeight="700" fontSize={14} color={c.text}>
+                  Estatísticas
+                </Text>
+                <Text fontSize={12} color={c.textSecondary}>
+                  Dashboard com gráficos e métricas
+                </Text>
+              </YStack>
+              <ChevronRight size={20} color={c.textPlaceholder} />
             </XStack>
           </Pressable>
-        </YStack>
+        </Link>
+
+        <Link href="/templates" asChild>
+          <Pressable accessibilityRole="link" accessibilityLabel="Templates de IA — criar e editar prompts customizados">
+            <XStack
+              bg={c.bgCard}
+              p="$3"
+              borderRadius="$3"
+              alignItems="center"
+              gap="$3"
+            >
+              <Sparkles size={20} color={c.secondary} />
+              <YStack f={1}>
+                <Text fontWeight="700" fontSize={14} color={c.text}>
+                  Templates de IA
+                </Text>
+                <Text fontSize={12} color={c.textSecondary}>
+                  Crie e edite prompts customizados
+                </Text>
+              </YStack>
+              <ChevronRight size={20} color={c.textPlaceholder} />
+            </XStack>
+          </Pressable>
+        </Link>
+
+        {/* Tutorial */}
+        <Pressable
+          onPress={async () => {
+            await AsyncStorage.removeItem(ONBOARDING_SEEN_KEY);
+            setShowOnboarding(true);
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Ver tutorial — rever o guia de introdução ao app"
+        >
+          <XStack
+            bg={c.bgCard}
+            p="$3"
+            borderRadius="$3"
+            alignItems="center"
+            gap="$3"
+          >
+            <HelpCircle size={20} color={c.primary} />
+            <YStack f={1}>
+              <Text fontWeight="700" fontSize={14} color={c.text}>
+                Ver tutorial
+              </Text>
+              <Text fontSize={12} color={c.textSecondary}>
+                Rever o guia de introdução ao app
+              </Text>
+            </YStack>
+            <ChevronRight size={20} color={c.textPlaceholder} />
+          </XStack>
+        </Pressable>
+
+        {/* SEÇÃO: PRIVACIDADE */}
+        <SectionHeader label="Privacidade" />
 
         {/* LGPD — Privacidade */}
         <YStack
@@ -1334,8 +1390,6 @@ export default function SettingsScreen() {
           borderWidth={1}
           borderColor={c.border}
           overflow="hidden"
-          mx="$4"
-          mt="$4"
           mb="$6"
         >
           <XStack px="$4" pt="$3" pb="$2" gap="$2" alignItems="center">
@@ -1426,6 +1480,8 @@ export default function SettingsScreen() {
         visible={showOnboarding}
         onDismiss={() => setShowOnboarding(false)}
       />
-    </YStack>
+
+      <BottomTabBar />
+    </View>
   );
 }
