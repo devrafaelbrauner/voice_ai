@@ -46,6 +46,7 @@ export const useVoiceRecorder = () => {
 
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const [isTransitioning, setIsTransitioning] = useState(false); // Bug #7: evita duplo-toque
   const [waveformData, setWaveformData] = useState<number[]>([]);
 
   const currentInputRef = useRef<RecordingInput | null>(null);
@@ -150,6 +151,9 @@ export const useVoiceRecorder = () => {
   };
 
   const startRecording = async () => {
+    // Bug #7: impede duplo-toque durante transição start/stop
+    if (isTransitioning) return;
+    setIsTransitioning(true);
     try {
       const ready = await ensureRecordingReady();
       if (!ready) return;
@@ -183,6 +187,8 @@ export const useVoiceRecorder = () => {
         ? 'Verifique se o microfone está disponível. No Simulator, confira em I/O > Audio Input se há uma entrada selecionada.'
         : 'Verifique se as permissões de microfone foram concedidas nas configurações do dispositivo.';
       Alert.alert('Não foi possível iniciar a gravação', hint + detail);
+    } finally {
+      setIsTransitioning(false);
     }
   };
 
@@ -210,6 +216,9 @@ export const useVoiceRecorder = () => {
   // Stops the recorder, deletes the temp file, resets state.
   const discardRecording = async () => {
     if (!isRecording && !isPaused) return;
+    // Bug #7: impede duplo-toque durante transição
+    if (isTransitioning) return;
+    setIsTransitioning(true);
     try {
       await recorder.stop();
       const uri = recorder.uri;
@@ -229,70 +238,83 @@ export const useVoiceRecorder = () => {
       setIsPaused(false);
       setWaveformData([]);
       hasAudioSignalRef.current = false;
+      setIsTransitioning(false);
     }
   };
 
   const stopRecording = async () => {
+    // Bug #7: impede duplo-toque durante transição
+    if (isTransitioning) return;
+    setIsTransitioning(true);
     try {
       const status = recorder.getStatus();
       await recorder.stop();
       const uri = recorder.uri;
       const durationMillis = status?.durationMillis ?? duration * 1000;
-      if (uri) {
-        if (durationMillis < MIN_RECORDING_DURATION_MS) {
-          await FileSystem.deleteAsync(uri, { idempotent: true });
-          Alert.alert(
-            'Gravação muito curta',
-            'Grave pelo menos 1 segundo de áudio antes de transcrever.'
-          );
-          return;
-        }
-        const fileName = `recording_${Date.now()}.m4a`;
-        const newUri = `${FileSystem.documentDirectory}${fileName}`;
 
-        try {
-          await FileSystem.moveAsync({ from: uri, to: newUri });
-        } catch (moveErr: any) {
-          logError('recorder', moveErr);
-          Alert.alert(
-            'Gravação não salva',
-            'Houve um erro ao salvar o arquivo de áudio no armazenamento. Tente gravar novamente.\n\nDetalhe: ' +
-              (moveErr?.message ?? String(moveErr))
-          );
-          return;
-        }
+      // Bug #10: uri null após stop (corrida ou estado inválido)
+      if (!uri) {
+        logWarn('recorder', 'stopRecording: recorder.uri é null após stop — gravação perdida');
+        Alert.alert(
+          'Gravação não salva',
+          'Ocorreu um erro inesperado ao finalizar a gravação. Por favor, tente gravar novamente.'
+        );
+        return;
+      }
 
-        let fileBytes = 0;
-        try {
-          const info = await FileSystem.getInfoAsync(newUri);
-          fileBytes =
-            info.exists && 'size' in info && typeof info.size === 'number'
-              ? info.size
-              : 0;
-        } catch (infoErr) {
-          logWarn('recorder', infoErr);
-        }
+      if (durationMillis < MIN_RECORDING_DURATION_MS) {
+        await FileSystem.deleteAsync(uri, { idempotent: true });
+        Alert.alert(
+          'Gravação muito curta',
+          'Grave pelo menos 1 segundo de áudio antes de transcrever.'
+        );
+        return;
+      }
+      const fileName = `recording_${Date.now()}.m4a`;
+      const newUri = `${FileSystem.documentDirectory}${fileName}`;
 
-        const seconds = Math.max(1, durationMillis / 1000);
+      try {
+        await FileSystem.moveAsync({ from: uri, to: newUri });
+      } catch (moveErr: any) {
+        logError('recorder', moveErr);
+        Alert.alert(
+          'Gravação não salva',
+          'Houve um erro ao salvar o arquivo de áudio no armazenamento. Tente gravar novamente.\n\nDetalhe: ' +
+            (moveErr?.message ?? String(moveErr))
+        );
+        return;
+      }
 
-        // Persist duration so it can be shown in the recordings list
-        try {
-          await setField(fileName, 'durationSecs', String(Math.round(seconds)));
-        } catch {
-          // Non-critical — don't block the recording flow
-        }
+      let fileBytes = 0;
+      try {
+        const info = await FileSystem.getInfoAsync(newUri);
+        fileBytes =
+          info.exists && 'size' in info && typeof info.size === 'number'
+            ? info.size
+            : 0;
+      } catch (infoErr) {
+        logWarn('recorder', infoErr);
+      }
 
-        if (fileBytes > 0 && fileBytes / seconds < MIN_AUDIO_BYTES_PER_SECOND) {
-          await FileSystem.deleteAsync(newUri, { idempotent: true });
-          const inputDescription = describeCurrentInput();
-          const signalDescription = hasAudioSignalRef.current
-            ? 'houve sinal no medidor, mas o arquivo final ficou inválido'
-            : 'não houve sinal detectável no medidor';
-          Alert.alert(
-            'Áudio não capturado',
-            `A gravação foi iniciada, mas o arquivo salvo não contém áudio válido.\n\nEntrada atual: ${inputDescription}.\nStatus: ${signalDescription}.${getSimulatorInputHint()}`
-          );
-        }
+      const seconds = Math.max(1, durationMillis / 1000);
+
+      // Persist duration so it can be shown in the recordings list
+      try {
+        await setField(fileName, 'durationSecs', String(Math.round(seconds)));
+      } catch {
+        // Non-critical — don't block the recording flow
+      }
+
+      if (fileBytes > 0 && fileBytes / seconds < MIN_AUDIO_BYTES_PER_SECOND) {
+        await FileSystem.deleteAsync(newUri, { idempotent: true });
+        const inputDescription = describeCurrentInput();
+        const signalDescription = hasAudioSignalRef.current
+          ? 'houve sinal no medidor, mas o arquivo final ficou inválido'
+          : 'não houve sinal detectável no medidor';
+        Alert.alert(
+          'Áudio não capturado',
+          `A gravação foi iniciada, mas o arquivo salvo não contém áudio válido.\n\nEntrada atual: ${inputDescription}.\nStatus: ${signalDescription}.${getSimulatorInputHint()}`
+        );
       }
     } catch (err: any) {
       logError('recorder', err);
@@ -310,6 +332,7 @@ export const useVoiceRecorder = () => {
       }
       setIsRecording(false);
       setIsPaused(false);
+      setIsTransitioning(false);
     }
   };
 
@@ -321,6 +344,7 @@ export const useVoiceRecorder = () => {
     discardRecording,
     isRecording,
     isPaused,
+    isTransitioning,
     duration,
     waveformData,
   };

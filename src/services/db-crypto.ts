@@ -210,15 +210,27 @@ export async function decrypt(stored: string): Promise<string> {
     const decrypted = await subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
     return new TextDecoder().decode(decrypted);
   } catch {
-    // Falha de decriptação — chave errada (dado cifrado em outro dispositivo),
+    // Seg #1: falha de decriptação — chave errada (dado cifrado em outro dispositivo),
     // dado corrompido, ou API de crypto indisponível/parcial no runtime.
-    // Retorna vazio em vez de propagar o erro.
+    // Retorna sentinel visível em vez de string vazia silenciosa, para que a
+    // UI possa exibir um aviso ao médico em vez de mostrar campo em branco.
     logWarn(
       'db-crypto',
-      'decrypt: falha (chave de outro dispositivo, dado corrompido ou crypto indisponível). Campo retornado vazio.'
+      'decrypt: falha (chave de outro dispositivo, dado corrompido ou crypto indisponível).'
     );
-    return '';
+    return DECRYPT_FAILED_SENTINEL;
   }
+}
+
+/**
+ * Sentinel retornado por `decrypt()` quando a decriptação falha.
+ * Use `isDecryptFailed()` para detectar este caso na UI.
+ */
+export const DECRYPT_FAILED_SENTINEL = '__DECRYPT_FAILED__';
+
+/** Retorna true se o valor é o sentinel de falha de decriptação. */
+export function isDecryptFailed(value: string): boolean {
+  return value === DECRYPT_FAILED_SENTINEL;
 }
 
 /**

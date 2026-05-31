@@ -16,7 +16,7 @@
 //   $ supabase secrets set OPENAI_API_KEY=sk-...
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
-import { corsHeaders } from '../_shared/cors.ts';
+import { buildCorsHeaders } from '../_shared/cors.ts';
 import { checkRateLimit, rateLimitHeaders } from '../_shared/rate-limit.ts';
 
 // Pricing — keep in sync with src/services/api_usage.ts on the client.
@@ -27,6 +27,7 @@ const OPENAI_TIMEOUT_MS = 115_000; // 115s — áudio pode ser grande; edge tem 
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // 25 MB
 
 Deno.serve(async (req) => {
+  const corsHeaders = buildCorsHeaders(req.headers.get('origin'));
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }

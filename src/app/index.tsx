@@ -15,6 +15,7 @@ import {
   Trash2,
 } from 'lucide-react-native';
 import { Link, useRouter } from 'expo-router';
+import type { Href } from 'expo-router';
 import { Alert, Linking, Pressable } from 'react-native';
 import { useColors } from '../context/ThemeContext';
 import { useThemeStore } from '../hooks/useTheme';
@@ -28,13 +29,14 @@ const IconButton = ({
   children,
   accessibilityLabel,
 }: {
-  href: string;
+  // Bug #13: usar tipo correto do expo-router em vez de `href as any`
+  href: Href;
   c: ColorPalette;
   isDark: boolean;
   children: React.ReactNode;
   accessibilityLabel: string;
 }) => (
-  <Link href={href as any} asChild>
+  <Link href={href} asChild>
     <Pressable
       accessibilityRole="link"
       accessibilityLabel={accessibilityLabel}
@@ -65,6 +67,7 @@ export default function RecordScreen() {
     discardRecording,
     isRecording,
     isPaused,
+    isTransitioning,
     duration,
     waveformData,
   } = useVoiceRecorder();
@@ -91,10 +94,13 @@ export default function RecordScreen() {
 
   // Handle iOS Home Screen Quick Actions (and any other deep links)
   useEffect(() => {
+    // Bug #12: armazenar ID do setTimeout para cancelar no unmount
+    let deepLinkTimerId: ReturnType<typeof setTimeout> | null = null;
+
     const handleUrl = ({ url }: { url: string }) => {
       if (url === 'voiceairecorder://record') {
         // Small delay so the screen is fully mounted before starting
-        setTimeout(() => startRecordingRef.current(), 300);
+        deepLinkTimerId = setTimeout(() => startRecordingRef.current(), 300);
       } else if (url === 'voiceairecorder://recordings') {
         router.push('/recordings');
       }
@@ -109,7 +115,11 @@ export default function RecordScreen() {
       handleUrl({ url });
     });
 
-    return () => sub.remove();
+    return () => {
+      sub.remove();
+      // Bug #12: cancelar timer pendente ao desmontar para evitar side-effect em componente desmontado
+      if (deepLinkTimerId !== null) clearTimeout(deepLinkTimerId);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -226,6 +236,7 @@ export default function RecordScreen() {
         <RecordButton
           isRecording={isRecording}
           isPaused={isPaused}
+          isTransitioning={isTransitioning}
           onPress={isRecording ? stopRecording : startRecording}
         />
 

@@ -177,6 +177,19 @@ export async function exportBackup(): Promise<void> {
       uti = 'public.json';
       dialogSuffix = ' (cifrado AES-256)';
     } else {
+      // Seg #5: confirmação explícita do médico antes de exportar PHI sem cifração
+      const confirmed = await new Promise<boolean>((resolve) => {
+        Alert.alert(
+          'Exportar sem cifração',
+          'A criptografia AES-256 não está disponível neste dispositivo. O backup será exportado em texto puro, podendo conter dados sensíveis de pacientes (PHI).\n\nDeseja continuar mesmo assim?',
+          [
+            { text: 'Cancelar', style: 'cancel', onPress: () => resolve(false) },
+            { text: 'Exportar mesmo assim', style: 'destructive', onPress: () => resolve(true) },
+          ]
+        );
+      });
+      if (!confirmed) return;
+
       // Fallback: export plain JSON with a warning
       fileContent = JSON.stringify(payload, null, 2);
       fileName = `voice-ai-recorder-backup-${stamp}.json`;

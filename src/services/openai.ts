@@ -728,7 +728,8 @@ export async function summarizeText(
       logWarn('api_usage', e);
     }
 
-    return json.choices[0].message.content as string;
+    // Bug #11: guarda contra choices vazio ou formato inesperado
+    return (json.choices?.[0]?.message?.content as string | undefined) ?? '';
   }
 
   // ── Proxy path (OpenAI via Supabase Edge Function) ────────────────────────

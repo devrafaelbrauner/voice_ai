@@ -13,12 +13,15 @@ import { useColors } from '../context/ThemeContext';
 interface RecordButtonProps {
   isRecording: boolean;
   isPaused?: boolean;
+  /** Bug #7: desabilita o botão durante transição start/stop para evitar corrida */
+  isTransitioning?: boolean;
   onPress: () => void;
 }
 
 export const RecordButton = ({
   isRecording,
   isPaused = false,
+  isTransitioning = false,
   onPress,
 }: RecordButtonProps) => {
   // Use built-in RN Animated (not Reanimated) to avoid worklet-runtime
@@ -79,18 +82,20 @@ export const RecordButton = ({
   return (
     <TouchableOpacity
       onPress={() => {
+        if (isTransitioning) return;
         // Haptic feedback via built-in Vibration (no extra native module needed)
         if (Platform.OS === 'android') {
           Vibration.vibrate(isRecording ? 40 : 80);
         }
         onPress();
       }}
-      activeOpacity={0.8}
-      style={{ alignItems: 'center' }}
+      activeOpacity={isTransitioning ? 1 : 0.8}
+      disabled={isTransitioning}
+      style={{ alignItems: 'center', opacity: isTransitioning ? 0.6 : 1 }}
       accessibilityRole="button"
       accessibilityLabel={a11yLabel}
       accessibilityHint={a11yHint}
-      accessibilityState={{ selected: isRecording }}
+      accessibilityState={{ selected: isRecording, disabled: isTransitioning }}
     >
       <Animated.View
         style={[
