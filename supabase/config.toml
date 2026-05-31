@@ -1,0 +1,7 @@
+project_id = "voice-ai-recorder"
+
+[functions.openai-transcribe]
+verify_jwt = true
+
+[functions.openai-chat]
+verify_jwt = true

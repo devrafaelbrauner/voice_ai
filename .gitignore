@@ -30,7 +30,10 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
+# env files (NEVER commit — contain secrets like Supabase keys)
+.env
+.env.*
+!.env.example
 .env*.local
 
 # typescript
@@ -41,3 +44,11 @@ app-example
 # generated native folders
 /ios
 /android
+
+# Android signing
+android/app/*.keystore
+!android/app/debug.keystore
+
+
+# Supabase CLI local state
+supabase/.temp/

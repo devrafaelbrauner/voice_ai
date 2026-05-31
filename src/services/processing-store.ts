@@ -1,0 +1,170 @@
+/**
+ * processing-store.ts — Store global de transcrição e processamento IA.
+ *
+ * Por que existe?
+ * As operações de transcrição (Whisper) e processamento (GPT) podem demorar
+ * 10–90 segundos. Se o médico navegar para outra tela enquanto aguarda, a
+ * versão anterior baseada em useState do componente `recordings.tsx` abandonava
+ * o resultado — o estado era descartado junto com o componente desmontado.
+ *
+ * Esta store Zustand vive fora do ciclo de vida de qualquer componente. As
+ * Promises continuam rodando e, ao terminar, salvam o resultado no banco local
+ * via setField() e incrementam `completionCount`. O componente de gravações
+ * assiste `completionCount` e recarrega a lista do banco quando notificado.
+ *
+ * Fluxo:
+ *   1. Médico toca "Transcrever" → startTranscription() adiciona o fileName
+ *      em `transcribingFiles` e dispara a Promise em background (fire-and-forget).
+ *   2. Médico navega para configurações, volta ou qualquer outra coisa.
+ *   3. Promise resolve → setField() grava no SQLite → completionCount++.
+ *   4. Se recordings.tsx ainda estiver montado, useEffect([completionCount])
+ *      detecta a mudança e chama loadRecordings(), atualizando a UI.
+ *   5. Se o componente tiver sido desmontado (ex.: médico pressionou voltar),
+ *      o dado já está no banco; na próxima vez que abrir a tela,
+ *      useFocusEffect carrega os dados frescos automaticamente.
+ */
+
+import { create } from 'zustand';
+import { Alert } from 'react-native';
+import { transcribeAudio, summarizeText } from './openai';
+import { setField, extractPatientName } from './db';
+import {
+  enqueueTranscription,
+  dequeueTranscription,
+  isNetworkError,
+} from './transcription-queue';
+import { logError } from './log';
+
+// ─── Tipos ────────────────────────────────────────────────────────────────────
+
+export interface TranscriptionItem {
+  fileName: string;
+  uri: string;
+  createdAt: string;
+  localFileExists: boolean;
+}
+
+export interface ProcessingItem {
+  fileName: string;
+  transcript: string;
+  createdAt: string;
+}
+
+interface ProcessingState {
+  /** FileNames de gravações sendo transcritas no momento. */
+  transcribingFiles: ReadonlySet<string>;
+  /** FileNames de gravações sendo processadas com IA no momento. */
+  processingFiles: ReadonlySet<string>;
+  /**
+   * Contador incrementado sempre que uma operação termina (sucesso ou falha).
+   * Componentes assistem a este valor para saber quando recarregar a lista.
+   */
+  completionCount: number;
+
+  /** Inicia transcrição em background. Idempotente: ignora se já em andamento. */
+  startTranscription: (item: TranscriptionItem) => void;
+  /** Inicia processamento IA em background. Idempotente: ignora se já em andamento. */
+  startProcessing: (item: ProcessingItem, templateId: string) => void;
+
+  /** Helper para verificar estado sem re-renderizar toda vez. */
+  isTranscribing: (fileName: string) => boolean;
+  isProcessing: (fileName: string) => boolean;
+}
+
+// ─── Store ────────────────────────────────────────────────────────────────────
+
+export const useProcessingStore = create<ProcessingState>((set, get) => ({
+  transcribingFiles: new Set<string>(),
+  processingFiles: new Set<string>(),
+  completionCount: 0,
+
+  isTranscribing: (fileName) => get().transcribingFiles.has(fileName),
+  isProcessing:   (fileName) => get().processingFiles.has(fileName),
+
+  // ── Transcrição ─────────────────────────────────────────────────────────────
+
+  startTranscription(item) {
+    if (!item.localFileExists) {
+      Alert.alert(
+        'Áudio indisponível',
+        'Esta gravação foi sincronizada apenas com metadados. O arquivo de áudio não está neste dispositivo.'
+      );
+      return;
+    }
+    if (get().transcribingFiles.has(item.fileName)) return; // já em andamento
+
+    set((s) => ({
+      transcribingFiles: new Set([...s.transcribingFiles, item.fileName]),
+    }));
+
+    // Fire-and-forget — roda independente do componente que disparou
+    void (async () => {
+      try {
+        const text = await transcribeAudio(item.uri);
+        await setField(item.fileName, 'transcript', text);
+        await dequeueTranscription(item.fileName);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (isNetworkError(err)) {
+          await enqueueTranscription({
+            fileName: item.fileName,
+            uri: item.uri,
+            createdAt: item.createdAt,
+            lastError: msg,
+          }).catch(() => {});
+          Alert.alert(
+            'Sem conexão',
+            'Sua gravação foi salva na fila offline. Vamos tentar transcrever automaticamente quando a conexão voltar.'
+          );
+        } else {
+          logError('processing-store.transcribe', err);
+          Alert.alert('Erro na transcrição', msg);
+        }
+      } finally {
+        set((s) => ({
+          transcribingFiles: new Set(
+            [...s.transcribingFiles].filter((f) => f !== item.fileName)
+          ),
+          completionCount: s.completionCount + 1,
+        }));
+      }
+    })();
+  },
+
+  // ── Processamento IA ────────────────────────────────────────────────────────
+
+  startProcessing(item, templateId) {
+    if (get().processingFiles.has(item.fileName)) return; // já em andamento
+
+    set((s) => ({
+      processingFiles: new Set([...s.processingFiles, item.fileName]),
+    }));
+
+    void (async () => {
+      try {
+        const result = await summarizeText(item.transcript, templateId, {
+          recordedAt: item.createdAt,
+        });
+        await setField(item.fileName, 'summary', result);
+        await setField(item.fileName, 'templateId', templateId);
+        const patientName = extractPatientName(result);
+        if (patientName) {
+          await setField(item.fileName, 'patientName', patientName);
+        }
+      } catch (err: unknown) {
+        logError('processing-store.process', err);
+        Alert.alert(
+          'Erro no processamento',
+          err instanceof Error ? err.message : String(err)
+        );
+      } finally {
+        set((s) => ({
+          processingFiles: new Set(
+            [...s.processingFiles].filter((f) => f !== item.fileName)
+          ),
+          completionCount: s.completionCount + 1,
+        }));
+      }
+    })();
+  },
+}));

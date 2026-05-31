@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "voice-ai-recorder",
+    "name": "VoiceAI",
     "slug": "voice-ai-recorder",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -8,7 +8,15 @@
     "scheme": "voiceairecorder",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "bundleIdentifier": "com.rafaelbrauner.voiceai",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ],
+        "NSMicrophoneUsageDescription": "O Voice AI Recorder usa o microfone para gravar consultas e evoluções médicas que serão transcritas automaticamente.",
+        "NSFaceIDUsageDescription": "O Voice AI Recorder usa Face ID para proteger o acesso seguro às suas gravações e credenciais clínicas.",
+        "NSLocalNetworkUsageDescription": "O Voice AI Recorder acessa a rede local para enviar evoluções diretamente ao EvoPad rodando no seu computador."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -17,7 +25,16 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE"
+      ],
+      "package": "com.rafaelbrauner.voiceai"
     },
     "web": {
       "output": "static",
@@ -34,11 +51,30 @@
             "imageWidth": 76
           }
         }
-      ]
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "O Voice AI Recorder usa o microfone para gravar consultas e evoluções médicas que serão transcritas automaticamente.",
+          "enableBackgroundRecording": true,
+          "enableBackgroundPlayback": true
+        }
+      ],
+      "expo-secure-store",
+      "expo-sqlite",
+      "expo-sharing",
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true,
-      "reactCompiler": true
-    }
+      "reactCompiler": false
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "8178f834-6437-4d18-9f8c-20dcd723527b"
+      }
+    },
+    "owner": "rafael.brauner"
   }
 }
