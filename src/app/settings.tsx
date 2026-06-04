@@ -31,6 +31,7 @@ import {
   PenLine,
   BadgeCheck,
   X as XIcon,
+  Mic,
 } from 'lucide-react-native';
 import { Link } from 'expo-router';
 import { getCurrentUser, signOut, onAuthChange, updatePassword } from '../services/auth';
@@ -55,6 +56,10 @@ import {
   OpenAIMode,
   getOpenRouterApiKey,
   setOpenRouterApiKey,
+  AVAILABLE_TRANSCRIPTION_MODELS,
+  getTranscriptionModel,
+  setTranscriptionModel,
+  TranscriptionModelId,
 } from '../services/openai';
 import {
   getDoctorProfile,
@@ -141,6 +146,7 @@ export default function SettingsScreen() {
   const [doctorSaved, setDoctorSaved] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
   const [model, setModelState] = useState<OpenAIModel>('gpt-4o-mini');
+  const [transcriptionModel, setTranscriptionModelState] = useState<TranscriptionModelId>('whisper-1');
   const [user, setUser] = useState<User | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
   const [lastSync, setLastSync] = useState<Date | null>(null);
@@ -183,6 +189,7 @@ export default function SettingsScreen() {
     });
     getDoctorProfile().then(setDoctor);
     getModel().then(setModelState);
+    getTranscriptionModel().then(setTranscriptionModelState);
     getCurrentUser().then(setUser);
     getForceDirect().then(setForceDirectState);
     getOpenAIMode().then(setOpenAIMode);
@@ -368,6 +375,11 @@ export default function SettingsScreen() {
   const handleSelectModel = async (id: OpenAIModel) => {
     await setModel(id);
     setModelState(id);
+  };
+
+  const handleSelectTranscriptionModel = async (id: TranscriptionModelId) => {
+    await setTranscriptionModel(id);
+    setTranscriptionModelState(id);
   };
 
   const handleSaveOpenRouterKey = async () => {
@@ -928,6 +940,77 @@ export default function SettingsScreen() {
                         {m.name}
                       </Text>
                       {/* Provider badge */}
+                      <XStack
+                        px="$1.5"
+                        py={2}
+                        borderRadius={6}
+                        bg={isOR ? c.bgYellowSoft : c.bgGreenSoft}
+                      >
+                        <Text
+                          fontSize={9}
+                          fontWeight="700"
+                          color={isOR ? c.accentOrange : c.accentGreenDark}
+                          letterSpacing={0.5}
+                        >
+                          {isOR ? 'OPENROUTER' : 'OPENAI'}
+                        </Text>
+                      </XStack>
+                      <Text fontSize={10} color={c.textSecondary}>
+                        {m.costHint}
+                      </Text>
+                    </XStack>
+                    <Text color={c.textSecondary} fontSize={12} mt="$1">
+                      {m.description}
+                    </Text>
+                  </YStack>
+                  {selected ? <Check size={20} color={c.secondary} /> : null}
+                </XStack>
+              </Pressable>
+            );
+          })}
+        </YStack>
+
+        {/* Modelo de Transcrição */}
+        <YStack gap="$3" mt="$4">
+          <XStack alignItems="center" gap="$2">
+            <Mic size={20} color={c.secondary} />
+            <Text fontSize={16} fontWeight="700" color={c.text}>
+              Modelo de Transcrição
+            </Text>
+          </XStack>
+          <Text color={c.textSecondary} fontSize={12}>
+            Escolha o motor de speech-to-text.{' '}
+            <Text color={c.accentGreenDark} fontSize={12} fontWeight="700">OPENAI</Text>
+            {' '}usa proxy seguro.{' '}
+            <Text color={c.accentOrange} fontSize={12} fontWeight="700">OPENROUTER</Text>
+            {' '}requer chave OpenRouter.
+          </Text>
+          {AVAILABLE_TRANSCRIPTION_MODELS.map((m) => {
+            const selected = transcriptionModel === m.id;
+            const isOR = m.provider === 'openrouter';
+            return (
+              <Pressable
+                key={m.id}
+                onPress={() => handleSelectTranscriptionModel(m.id)}
+                accessibilityRole="radio"
+                accessibilityLabel={m.name}
+                accessibilityHint={m.description}
+                accessibilityState={{ checked: selected }}
+              >
+                <XStack
+                  bg={selected ? c.bgPurpleSoft : c.bgSubtle}
+                  borderWidth={selected ? 2 : 1}
+                  borderColor={selected ? c.secondary : c.border}
+                  p="$3"
+                  borderRadius="$3"
+                  alignItems="center"
+                  gap="$3"
+                >
+                  <YStack f={1}>
+                    <XStack alignItems="center" gap="$2" flexWrap="wrap">
+                      <Text fontWeight="700" fontSize={14} color={selected ? c.secondary : c.text}>
+                        {m.name}
+                      </Text>
                       <XStack
                         px="$1.5"
                         py={2}

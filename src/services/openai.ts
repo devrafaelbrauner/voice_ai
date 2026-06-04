@@ -24,6 +24,7 @@ import {
 
 const KEY_STORAGE = 'openai_api_key';
 const MODEL_STORAGE = 'openai_model';
+const TRANSCRIPTION_MODEL_STORAGE = 'transcription_model';
 const FORCE_DIRECT_STORAGE = 'openai_force_direct';
 const OPENROUTER_KEY_STORAGE = 'openrouter_api_key';
 
@@ -132,6 +133,89 @@ export async function setOpenRouterApiKey(key: string): Promise<void> {
   await SecureStore.setItemAsync(OPENROUTER_KEY_STORAGE, key.trim());
 }
 
+// ── Transcription model selection ────────────────────────────────────────────
+//
+// Separado do modelo de chat: o modelo de transcrição é específico para
+// speech-to-text e pode usar OpenRouter (endpoint compatível com Whisper API).
+// 'whisper-1' = caminho padrão (proxy Supabase ou direto via OpenAI).
+// Demais modelos = OpenRouter /v1/audio/transcriptions.
+
+export type TranscriptionModelId =
+  | 'whisper-1'
+  | 'openai/gpt-4o-mini-transcribe'
+  | 'openai/gpt-4o-transcribe'
+  | 'microsoft/mai-transcribe-1.5'
+  | 'openai/whisper-large-v3-turbo'
+  | 'openai/whisper-large-v3';
+
+export interface TranscriptionModelInfo {
+  id: TranscriptionModelId;
+  name: string;
+  description: string;
+  costHint: string;
+  provider: 'openai' | 'openrouter';
+}
+
+export const AVAILABLE_TRANSCRIPTION_MODELS: TranscriptionModelInfo[] = [
+  {
+    id: 'whisper-1',
+    name: 'Whisper-1',
+    description: 'Modelo padrão OpenAI. Usado via proxy seguro quando logado.',
+    costHint: '~$0.006/min',
+    provider: 'openai',
+  },
+  {
+    id: 'openai/gpt-4o-mini-transcribe',
+    name: 'GPT-4o Mini Transcribe',
+    description: 'Speech-to-text econômico da OpenAI baseado no GPT-4o Mini. Precificado por token.',
+    costHint: 'Via OpenRouter',
+    provider: 'openrouter',
+  },
+  {
+    id: 'openai/gpt-4o-transcribe',
+    name: 'GPT-4o Transcribe',
+    description: 'Maior precisão de transcrição da OpenAI. Ideal para sotaques e terminologia médica.',
+    costHint: 'Via OpenRouter',
+    provider: 'openrouter',
+  },
+  {
+    id: 'microsoft/mai-transcribe-1.5',
+    name: 'MAI-Transcribe 1.5',
+    description: 'Transcrição rápida da Microsoft com Azure AI Speech. Suporta 100+ idiomas e detecção automática.',
+    costHint: '$0,36/hora',
+    provider: 'openrouter',
+  },
+  {
+    id: 'openai/whisper-large-v3-turbo',
+    name: 'Whisper Large V3 Turbo',
+    description: 'Versão otimizada do Whisper Large V3. Até 216× velocidade real, WER 12%, 99+ idiomas.',
+    costHint: '$0,04/hora',
+    provider: 'openrouter',
+  },
+  {
+    id: 'openai/whisper-large-v3',
+    name: 'Whisper Large V3',
+    description: 'Modelo open-source robusto a ruído, WER 10.3%, 1.550M parâmetros, suporta timestamps.',
+    costHint: '$0,0015/min',
+    provider: 'openrouter',
+  },
+];
+
+const ALL_TRANSCRIPTION_MODEL_IDS = new Set(
+  AVAILABLE_TRANSCRIPTION_MODELS.map((m) => m.id)
+);
+
+export async function getTranscriptionModel(): Promise<TranscriptionModelId> {
+  const stored = await SecureStore.getItemAsync(TRANSCRIPTION_MODEL_STORAGE);
+  if (stored && ALL_TRANSCRIPTION_MODEL_IDS.has(stored as TranscriptionModelId)) {
+    return stored as TranscriptionModelId;
+  }
+  return 'whisper-1';
+}
+
+export async function setTranscriptionModel(model: TranscriptionModelId): Promise<void> {
+  await SecureStore.setItemAsync(TRANSCRIPTION_MODEL_STORAGE, model);
+}
 
 export async function getApiKey(): Promise<string | null> {
   return await SecureStore.getItemAsync(KEY_STORAGE);
@@ -170,15 +254,68 @@ async function expoFetchWithTimeout(
   }
 }
 
-function createTranscriptionFormData(uri: string): FormData {
+function createTranscriptionFormData(uri: string, model = 'whisper-1'): FormData {
   const file = new File(uri);
   const formData = new FormData();
   formData.append('file', file as unknown as Blob, file.name || 'recording.m4a');
-  formData.append('model', 'whisper-1');
+  formData.append('model', model);
   formData.append('language', 'pt');
   formData.append('response_format', 'json');
   formData.append('prompt', WHISPER_MEDICAL_PROMPT);
   return formData;
+}
+
+/**
+ * Transcreve áudio via OpenRouter usando modelos de speech-to-text
+ * (GPT-4o Transcribe, Whisper Large V3, MAI-Transcribe, etc.).
+ * A API do OpenRouter é compatível com o formato multipart do Whisper.
+ */
+async function transcribeViaOpenRouter(
+  uri: string,
+  model: TranscriptionModelId
+): Promise<string> {
+  const orKey = await getOpenRouterApiKey();
+  if (!orKey) {
+    throw new Error(
+      'Chave OpenRouter não configurada. Acesse Configurações → API Keys e insira sua chave OpenRouter.'
+    );
+  }
+
+  const response = await expoFetchWithTimeout(
+    'https://openrouter.ai/api/v1/audio/transcriptions',
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${orKey}` },
+      body: createTranscriptionFormData(uri, model),
+    },
+    DIRECT_TRANSCRIBE_TIMEOUT_MS
+  );
+
+  const body = await response.text();
+  if (!response.ok) {
+    if (isAudioTooShortError(body)) {
+      throw new Error(
+        'Gravação muito curta para transcrever. Grave pelo menos 1 segundo de áudio.'
+      );
+    }
+    throw new Error(`OpenRouter Transcription ${response.status}: ${body.slice(0, 200)}`);
+  }
+
+  const json = JSON.parse(body);
+
+  try {
+    const audioSeconds = await estimateAudioSeconds(uri);
+    await logApiUsage({
+      operation: 'whisper',
+      model,
+      audioSeconds,
+      costUSD: 0, // OpenRouter varia por modelo; logamos 0 como placeholder
+    });
+  } catch (e) {
+    logWarn('api_usage', e);
+  }
+
+  return typeof json.text === 'string' ? json.text : '';
 }
 
 // Estima a duração do áudio a partir do tamanho do arquivo .m4a.
@@ -217,6 +354,12 @@ export async function transcribeAudio(uri: string): Promise<string> {
     throw new Error(
       'Gravação muito curta para transcrever. Grave pelo menos 1 segundo de áudio e tente novamente.'
     );
+  }
+
+  // Se o usuário escolheu um modelo de transcrição via OpenRouter, usar esse caminho.
+  const transcriptionModel = await getTranscriptionModel();
+  if (transcriptionModel !== 'whisper-1') {
+    return transcribeViaOpenRouter(uri, transcriptionModel);
   }
 
   const mode = await getOpenAIMode();
