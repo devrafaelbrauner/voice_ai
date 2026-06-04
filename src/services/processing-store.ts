@@ -27,7 +27,7 @@
 import { create } from 'zustand';
 import { Alert } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
-import { transcribeAudio, summarizeText } from './openai';
+import { transcribeAudio, summarizeText, summarizeTextStream } from './openai';
 import { setField, extractPatientName } from './db';
 import {
   enqueueTranscription,
@@ -57,6 +57,12 @@ interface ProcessingState {
   /** FileNames de gravações sendo processadas com IA no momento. */
   processingFiles: ReadonlySet<string>;
   /**
+   * Conteúdo em tempo real gerado pelo modelo enquanto processa.
+   * Chave: fileName. Valor: texto acumulado até o momento.
+   * Removido quando o processamento termina (sucesso ou falha).
+   */
+  streamingContent: Readonly<Record<string, string>>;
+  /**
    * Contador incrementado sempre que uma operação termina (sucesso ou falha).
    * Componentes assistem a este valor para saber quando recarregar a lista.
    */
@@ -77,6 +83,7 @@ interface ProcessingState {
 export const useProcessingStore = create<ProcessingState>((set, get) => ({
   transcribingFiles: new Set<string>(),
   processingFiles: new Set<string>(),
+  streamingContent: {},
   completionCount: 0,
 
   isTranscribing: (fileName) => get().transcribingFiles.has(fileName),
@@ -155,23 +162,45 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
     })();
   },
 
-  // ── Processamento IA ────────────────────────────────────────────────────────
+  // ── Processamento IA (streaming) ────────────────────────────────────────────
 
   startProcessing(item, templateId) {
     if (get().processingFiles.has(item.fileName)) return; // já em andamento
 
     set((s) => ({
       processingFiles: new Set([...s.processingFiles, item.fileName]),
+      // Inicializa entrada de streaming com string vazia
+      streamingContent: { ...s.streamingContent, [item.fileName]: '' },
     }));
 
     void (async () => {
+      let accumulated = '';
       try {
-        const result = await summarizeText(item.transcript, templateId, {
-          recordedAt: item.createdAt,
-        });
-        await setField(item.fileName, 'summary', result);
+        // summarizeTextStream emite chunks em tempo real.
+        // Para modelos sem suporte a streaming (proxy / reasoning), emite o
+        // texto completo num único chunk — a UI se comporta da mesma forma.
+        await summarizeTextStream(
+          item.transcript,
+          templateId,
+          (chunk) => {
+            accumulated += chunk;
+            set((s) => ({
+              streamingContent: {
+                ...s.streamingContent,
+                [item.fileName]: accumulated,
+              },
+            }));
+          },
+          { recordedAt: item.createdAt }
+        );
+
+        if (!accumulated.trim()) {
+          throw new Error('O modelo retornou uma resposta vazia. Tente novamente.');
+        }
+
+        await setField(item.fileName, 'summary', accumulated);
         await setField(item.fileName, 'templateId', templateId);
-        const patientName = extractPatientName(result);
+        const patientName = extractPatientName(accumulated);
         if (patientName) {
           await setField(item.fileName, 'patientName', patientName);
         }
@@ -182,12 +211,17 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
           err instanceof Error ? err.message : String(err)
         );
       } finally {
-        set((s) => ({
-          processingFiles: new Set(
-            [...s.processingFiles].filter((f) => f !== item.fileName)
-          ),
-          completionCount: s.completionCount + 1,
-        }));
+        set((s) => {
+          // Remove a entrada de streaming independentemente do resultado
+          const { [item.fileName]: _removed, ...restStreaming } = s.streamingContent;
+          return {
+            processingFiles: new Set(
+              [...s.processingFiles].filter((f) => f !== item.fileName)
+            ),
+            streamingContent: restStreaming,
+            completionCount: s.completionCount + 1,
+          };
+        });
       }
     })();
   },

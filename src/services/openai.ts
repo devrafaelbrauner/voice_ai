@@ -946,6 +946,180 @@ export async function summarizeText(
   return json.choices[0].message.content as string;
 }
 
+// ── Streaming (SSE) helpers ──────────────────────────────────────────────────
+
+/**
+ * Parseia um stream SSE no formato OpenAI/OpenRouter e emite cada chunk de
+ * conteúdo delta como um item do generator.
+ *
+ * Formato esperado:
+ *   data: {"choices":[{"delta":{"content":"Hello"},...}],...}
+ *   data: [DONE]
+ */
+async function* parseSSEChunks(response: Response): AsyncGenerator<string> {
+  const reader = (response.body as ReadableStream<Uint8Array> | null)?.getReader();
+  if (!reader) return;
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const payload = trimmed.slice(5).trim();
+        if (payload === '[DONE]') return;
+        try {
+          const json = JSON.parse(payload);
+          const delta: unknown = json.choices?.[0]?.delta?.content;
+          if (typeof delta === 'string') yield delta;
+        } catch {
+          // linha malformada — ignorar
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+// ── SummarizeMetadata (re-exported for use in streaming) ─────────────────────
+
+/**
+ * Versão streaming de summarizeText.
+ *
+ * Chama onChunk para cada fragmento de texto à medida que o modelo gera a
+ * resposta — permite exibir o conteúdo em tempo real na UI.
+ *
+ * Casos de fallback (sem streaming):
+ *   • Modelos reasoning (o1, o3, o4) — não suportam SSE
+ *   • Modo proxy (Supabase Edge Function) — retorna JSON completo
+ *
+ * @returns Promise que resolve quando a resposta inteira foi recebida.
+ *          O conteúdo completo é a concatenação de todos os chunks emitidos.
+ */
+export async function summarizeTextStream(
+  text: string,
+  templateId: string = 'summary',
+  onChunk: (chunk: string) => void,
+  metadata?: SummarizeMetadata
+): Promise<void> {
+  // ── Auto-roteamento: Receituário → Controle Especial ─────────────────────
+  let effectiveTemplateId = templateId;
+  if (templateId === 'medical_prescription' && transcriptHasControlledSubstance(text)) {
+    effectiveTemplateId = 'medical_controlled_prescription';
+  }
+
+  const template =
+    (await getTemplateById(effectiveTemplateId)) ?? BUILTIN_TEMPLATES[0];
+
+  let userContent = `Transcrição:\n\n${text}`;
+  if (metadata?.recordedAt) {
+    const d = new Date(metadata.recordedAt);
+    const dateStr = d.toLocaleDateString('pt-BR');
+    const timeStr = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    userContent = `Metadados da gravação:\nData: ${dateStr}\nHora: ${timeStr}\n\n${userContent}`;
+  }
+
+  const currentModel = await getModel();
+  const modelInfo = AVAILABLE_MODELS.find((m) => m.id === currentModel) ?? AVAILABLE_MODELS[0];
+  const messages = [
+    { role: 'system' as const, content: template.systemPrompt },
+    { role: 'user' as const, content: userContent },
+  ];
+
+  // ── Fallback: reasoning models não suportam streaming ────────────────────
+  if (isReasoningModel(modelInfo.apiModelId)) {
+    const result = await summarizeText(text, templateId, metadata);
+    onChunk(result);
+    return;
+  }
+
+  // ── Fallback: proxy mode → Edge Function não suporta SSE ─────────────────
+  const mode = await getOpenAIMode();
+  if (mode === 'proxy' && modelInfo.provider === 'openai') {
+    const result = await summarizeText(text, templateId, metadata);
+    onChunk(result);
+    return;
+  }
+
+  // ── Streaming: OpenRouter ou Direct OpenAI ───────────────────────────────
+  let apiUrl: string;
+  let authKey: string;
+  const extraHeaders: Record<string, string> = {};
+
+  if (modelInfo.provider === 'openrouter') {
+    const orKey = await getOpenRouterApiKey();
+    if (!orKey) {
+      throw new Error(
+        'Chave OpenRouter não configurada. Acesse Configurações → API Keys.'
+      );
+    }
+    apiUrl = 'https://openrouter.ai/api/v1/chat/completions';
+    authKey = orKey;
+    extraHeaders['HTTP-Referer'] = 'com.rafaelbrauner.voiceai';
+    extraHeaders['X-Title'] = 'Voice AI Recorder';
+  } else {
+    const apiKey = await getApiKey();
+    if (!apiKey) {
+      throw new Error(
+        'Sem credencial: configure a OpenAI API key em Configurações.'
+      );
+    }
+    apiUrl = 'https://api.openai.com/v1/chat/completions';
+    authKey = apiKey;
+  }
+
+  const requestBody = {
+    ...buildChatBody(modelInfo.apiModelId, messages, 0.3, 1500),
+    stream: true,
+  };
+
+  const response = await expoFetchWithTimeout(
+    apiUrl,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${authKey}`,
+        'Content-Type': 'application/json',
+        ...extraHeaders,
+      },
+      body: JSON.stringify(requestBody),
+    },
+    DIRECT_CHAT_TIMEOUT_MS
+  );
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new Error(`API ${response.status}: ${errText.slice(0, 200)}`);
+  }
+
+  for await (const chunk of parseSSEChunks(response)) {
+    onChunk(chunk);
+  }
+
+  // Logging simplificado: tokens não disponíveis no stream; custo = 0
+  try {
+    await logApiUsage({
+      operation: 'chat',
+      model: currentModel,
+      inputTokens: 0,
+      outputTokens: 0,
+      costUSD: 0,
+    });
+  } catch (e) {
+    logWarn('api_usage', e);
+  }
+}
+
 export const getTranscript = (fileName: string) =>
   getField(fileName, 'transcript');
 export const saveTranscript = (fileName: string, text: string) =>

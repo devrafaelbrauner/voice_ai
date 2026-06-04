@@ -223,6 +223,7 @@ export default function RecordingsScreen() {
   const {
     transcribingFiles,
     processingFiles,
+    streamingContent,
     completionCount,
     startTranscription,
     startProcessing,
@@ -848,12 +849,13 @@ export default function RecordingsScreen() {
       playingUri,
       transcribingFiles,
       processingFiles,
+      streamingContent,
       exportingUri,
       editingFile,
       copiedKey,
       editValue,
     }),
-    [playingUri, transcribingFiles, processingFiles, exportingUri, editingFile, copiedKey, editValue]
+    [playingUri, transcribingFiles, processingFiles, streamingContent, exportingUri, editingFile, copiedKey, editValue]
   );
 
   return (
@@ -1380,6 +1382,7 @@ export default function RecordingsScreen() {
               const isThisPlaying = playingUri === item.uri && status?.playing;
               const isTranscribing = transcribingFiles.has(item.fileName);
               const isProcessing = processingFiles.has(item.fileName);
+              const liveContent = streamingContent[item.fileName] ?? '';
               const isEditing = editingFile === item.fileName;
               const displayName =
                 item.customName ?? formatDefaultName(item.createdAt);
@@ -1651,6 +1654,29 @@ export default function RecordingsScreen() {
                         try { player.setPlaybackRate(rate); } catch {}
                       }}
                     />
+                  )}
+
+                  {/* Live streaming preview — aparece enquanto o modelo gera */}
+                  {isProcessing && liveContent.trim().length > 0 && (
+                    <YStack
+                      bg={c.bgPurpleSoft}
+                      p="$3"
+                      borderRadius="$3"
+                      borderWidth={1}
+                      borderColor={c.borderPurple}
+                      gap="$2"
+                    >
+                      <XStack alignItems="center" gap="$2">
+                        <Sparkles size={14} color={c.secondary} />
+                        <Text fontWeight="700" fontSize={12} color={c.secondary} f={1}>
+                          Gerando…
+                        </Text>
+                      </XStack>
+                      <Text fontSize={14} color={c.accentGreenDark} lineHeight={20}>
+                        {stripMarkers(liveContent)}
+                        <Text color={c.secondary}>▋</Text>
+                      </Text>
+                    </YStack>
                   )}
 
                   {item.summary && (
