@@ -956,9 +956,29 @@ export async function summarizeText(
  *   data: {"choices":[{"delta":{"content":"Hello"},...}],...}
  *   data: [DONE]
  */
+/**
+ * True se o runtime suporta as APIs necessárias para SSE streaming
+ * (ReadableStream no body da resposta + TextDecoder no Hermes).
+ * Em versões antigas do Hermes/Android essas APIs podem não existir —
+ * nesse caso usamos o caminho não-streaming.
+ */
+function isStreamingSupported(): boolean {
+  try {
+    return (
+      typeof TextDecoder !== 'undefined' &&
+      typeof ReadableStream !== 'undefined'
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function* parseSSEChunks(response: Response): AsyncGenerator<string> {
-  const reader = (response.body as ReadableStream<Uint8Array> | null)?.getReader();
-  if (!reader) return;
+  const body = response.body as ReadableStream<Uint8Array> | null;
+  if (!body || typeof body.getReader !== 'function') {
+    throw new Error('STREAM_UNSUPPORTED');
+  }
+  const reader = body.getReader();
 
   const decoder = new TextDecoder();
   let buffer = '';
@@ -1051,6 +1071,13 @@ export async function summarizeTextStream(
     return;
   }
 
+  // ── Fallback: runtime sem suporte a streaming (Hermes antigo) ────────────
+  if (!isStreamingSupported()) {
+    const result = await summarizeText(text, templateId, metadata);
+    onChunk(result);
+    return;
+  }
+
   // ── Streaming: OpenRouter ou Direct OpenAI ───────────────────────────────
   let apiUrl: string;
   let authKey: string;
@@ -1083,27 +1110,43 @@ export async function summarizeTextStream(
     stream: true,
   };
 
-  const response = await expoFetchWithTimeout(
-    apiUrl,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${authKey}`,
-        'Content-Type': 'application/json',
-        ...extraHeaders,
+  let emittedAny = false;
+  try {
+    const response = await expoFetchWithTimeout(
+      apiUrl,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${authKey}`,
+          'Content-Type': 'application/json',
+          ...extraHeaders,
+        },
+        body: JSON.stringify(requestBody),
       },
-      body: JSON.stringify(requestBody),
-    },
-    DIRECT_CHAT_TIMEOUT_MS
-  );
+      DIRECT_CHAT_TIMEOUT_MS
+    );
 
-  if (!response.ok) {
-    const errText = await response.text().catch(() => '');
-    throw new Error(`API ${response.status}: ${errText.slice(0, 200)}`);
-  }
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      throw new Error(`API ${response.status}: ${errText.slice(0, 200)}`);
+    }
 
-  for await (const chunk of parseSSEChunks(response)) {
-    onChunk(chunk);
+    for await (const chunk of parseSSEChunks(response)) {
+      emittedAny = true;
+      onChunk(chunk);
+    }
+  } catch (err) {
+    // Se o streaming falhou ANTES de emitir qualquer conteúdo, tentamos o
+    // caminho não-streaming — garante que o processamento funcione mesmo em
+    // dispositivos/runtimes onde SSE não está disponível.
+    if (!emittedAny) {
+      logWarn('summarizeTextStream.fallback', err);
+      const result = await summarizeText(text, templateId, metadata);
+      onChunk(result);
+      return;
+    }
+    // Conteúdo parcial já foi emitido — não dá para recomeçar sem duplicar.
+    throw err;
   }
 
   // Logging simplificado: tokens não disponíveis no stream; custo = 0

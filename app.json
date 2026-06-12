@@ -2,7 +2,7 @@
   "expo": {
     "name": "VoiceAI",
     "slug": "voice-ai-recorder",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "voiceairecorder",
@@ -34,7 +34,8 @@
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.FOREGROUND_SERVICE_MICROPHONE"
       ],
-      "package": "com.rafaelbrauner.voiceai"
+      "package": "com.rafaelbrauner.voiceai",
+      "versionCode": 2
     },
     "web": {
       "output": "static",
