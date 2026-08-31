@@ -49,6 +49,9 @@ app-example
 android/app/*.keystore
 !android/app/debug.keystore
 
+# Store submission credentials
+google-service-account.json
+
 
 # Supabase CLI local state
 supabase/.temp/

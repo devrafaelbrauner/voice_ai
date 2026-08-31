@@ -1650,7 +1650,7 @@ export default function SettingsScreen() {
             A signature_session é um token OAuth emitido pelo Bird ID que
             permite múltiplas assinaturas ICP-Brasil enquanto estiver dentro
             do prazo de validade ou não for revogada. Obtida no portal
-            birdid.com.br com o escopo "sign". Armazenada com segurança no
+            birdid.com.br com o escopo &quot;sign&quot;. Armazenada com segurança no
             Keychain / SecureStore do dispositivo.
           </Text>
         </YStack>

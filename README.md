@@ -1,56 +1,65 @@
-# Welcome to your Expo app 👋
+# VoiceAI
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Aplicativo Expo/React Native para gravação de áudio, transcrição e geração de evoluções clínicas. O projeto integra Supabase para autenticação/sincronização e Edge Functions que intermediam as chamadas à OpenAI.
 
-## Get started
+## Requisitos
 
-1. Install dependencies
+- Node.js 20.19 ou superior
+- npm
+- Expo/EAS CLI conforme a tarefa
+- Conta e projeto Supabase para autenticação, sincronização e Edge Functions
 
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Configuração local
 
 ```bash
-npm run reset-project
+git clone https://github.com/devrafaelbrauner/voice_ai.git
+cd voice_ai
+cp .env.example .env
+npm ci
+npm start
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Preencha `.env` com os valores do seu projeto Supabase:
 
-### Other setup steps
+```dotenv
+EXPO_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
+EXPO_PUBLIC_SUPABASE_ANON_KEY=eyJ...
+```
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+Nunca inclua `.env`, chaves de assinatura ou `google-service-account.json` no Git.
 
-## Learn more
+## Comandos
 
-To learn more about developing your project with Expo, look at the following resources:
+```bash
+npm start                 # Expo development server
+npm run android           # Executa Android localmente
+npm run ios               # Executa iOS localmente
+npm run web               # Executa a versão web
+npm run lint              # ESLint
+npm run typecheck         # TypeScript sem emissão
+npm run expo:check        # Resolve e valida o manifest Expo
+npm run release:check     # Gates locais de release
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+## Backend Supabase
 
-## Join the community
+As Edge Functions `openai-chat` e `openai-transcribe` mantêm a chave OpenAI fora do dispositivo. Consulte [supabase/README.md](supabase/README.md) para configurar migrations, secrets e deploy das funções.
 
-Join our community of developers creating universal apps.
+## Versionamento e releases
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+O projeto usa SemVer e tags anotadas no formato `vMAJOR.MINOR.PATCH`. A versão pública deve permanecer alinhada entre `app.json` e `package.json`.
+
+- `expo.version`: versão exibida ao usuário.
+- `android.versionCode` e `ios.buildNumber`: números de build monotonicamente crescentes, administrados pelo EAS em builds de produção.
+- `CHANGELOG.md`: histórico das mudanças por release.
+- `RELEASE.md`: procedimento operacional de release, build, distribuição e rollback.
+
+A release atual de baseline é `1.0.1`. Antes de criar a primeira build remota, inicialize no EAS os números de build já distribuídos com `eas build:version:set`.
+
+## Qualidade contínua
+
+O workflow `.github/workflows/ci.yml` executa instalação reprodutível, validação de manifest, lint e TypeScript em pull requests e em pushes para `main`.
+
+## Segurança e privacidade
+
+Este aplicativo processa dados clínicos. Antes de qualquer distribuição de produção, valide a configuração implantada do Supabase (RLS, secrets, Auth e rate limits), as políticas de retenção e exclusão de dados e a documentação LGPD aplicável.
