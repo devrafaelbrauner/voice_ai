@@ -8,6 +8,7 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o 
 
 ### Corrigido
 - Fallback robusto para ambientes sem suporte a streaming SSE nas respostas de IA.
+- Corrigida a cadeia transitiva vulnerável de `uuid` (via `xcode`/Expo), fixando-a em `11.1.1`.
 
 ### Infraestrutura
 - Estabelecido o baseline rastreável de release com versão alinhada entre o manifest do aplicativo e o pacote Node.

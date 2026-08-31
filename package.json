@@ -68,5 +68,8 @@
     "eslint-config-expo": "~55.0.1",
     "typescript": "~5.9.2"
   },
-  "private": true
+  "private": true,
+  "overrides": {
+    "uuid": "11.1.1"
+  }
 }
