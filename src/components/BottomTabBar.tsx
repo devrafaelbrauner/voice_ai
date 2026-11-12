@@ -67,6 +67,6 @@ const styles = StyleSheet.create({
     paddingTop: 6,
   },
   label: {
-    fontSize: 10,
+    fontSize: 12,
   },
 });

@@ -9,6 +9,7 @@ import {
 import { Mic, Square } from 'lucide-react-native';
 import { Text } from 'tamagui';
 import { useColors } from '../context/ThemeContext';
+import { useReduceMotion } from '../hooks/useReduceMotion';
 
 interface RecordButtonProps {
   isRecording: boolean;
@@ -28,9 +29,11 @@ export const RecordButton = ({
   // initialization issues that block touch events on iOS 18 / Expo Go.
   const scale = useRef(new Animated.Value(1)).current;
   const opacity = useRef(new Animated.Value(1)).current;
+  const reduceMotion = useReduceMotion();
 
   useEffect(() => {
-    if (isRecording && !isPaused) {
+    // Pulso só com movimento permitido; com reduce motion o botão fica estático.
+    if (isRecording && !isPaused && !reduceMotion) {
       Animated.loop(
         Animated.sequence([
           Animated.parallel([
@@ -53,7 +56,7 @@ export const RecordButton = ({
       scale.stopAnimation();
       opacity.stopAnimation();
     };
-  }, [isRecording, isPaused, scale, opacity]);
+  }, [isRecording, isPaused, reduceMotion, scale, opacity]);
 
   const animatedStyle = {
     transform: [{ scale }],
@@ -113,9 +116,9 @@ export const RecordButton = ({
       <Text
         textAlign="center"
         marginTop="$2"
-        color={isRecording ? '#c0392b' : c.primaryDeep}
+        color={isRecording ? c.accentRedText : c.primaryDeep}
         fontWeight="700"
-        fontSize={10}
+        fontSize={12}
         letterSpacing={2}
         textTransform="uppercase"
       >

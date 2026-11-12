@@ -96,7 +96,7 @@ export function AudioPlayerBar({ currentTime, duration, isBuffering, onSeek, onS
 
       {/* Time display */}
       <Text
-        fontSize={11}
+        fontSize={12}
         color={c.textSecondary}
         fontWeight="600"
         flexShrink={0}
@@ -115,7 +115,7 @@ export function AudioPlayerBar({ currentTime, duration, isBuffering, onSeek, onS
         accessibilityHint="Toque para alterar a velocidade de reprodução"
       >
         <Text
-          fontSize={10}
+          fontSize={12}
           fontWeight="800"
           color={speed !== 1 ? c.primary : c.textMuted}
           flexShrink={0}

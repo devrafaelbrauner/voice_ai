@@ -96,7 +96,7 @@ function SectionHeader({ label }: { label: string }) {
   return (
     <Text
       style={{
-        fontSize: 11,
+        fontSize: 12,
         fontWeight: '700',
         color: c.textMuted,
         textTransform: 'uppercase',
@@ -110,8 +110,14 @@ function SectionHeader({ label }: { label: string }) {
   );
 }
 
+const THEME_OPTIONS: { value: 'light' | 'dark' | 'system'; label: string }[] = [
+  { value: 'light', label: 'Claro' },
+  { value: 'dark', label: 'Escuro' },
+  { value: 'system', label: 'Sistema' },
+];
+
 export default function SettingsScreen() {
-  const { isDark, toggleTheme } = useTheme();
+  const { isDark, mode: themeMode, setMode: setThemeMode } = useTheme();
   const c = useColors();
   const { accepted: lgpdAccepted, acceptedAt: lgpdAcceptedAt, revokeConsent: revokeLGPD } = useLGPDConsent();
 
@@ -496,7 +502,7 @@ export default function SettingsScreen() {
                 </XStack>
               </Pressable>
               {lastSync && (
-                <Text color={c.textSecondary} fontSize={11} textAlign="center">
+                <Text color={c.textSecondary} fontSize={12} textAlign="center">
                   Última sincronização: {lastSync.toLocaleString('pt-BR')}
                 </Text>
               )}
@@ -857,7 +863,7 @@ export default function SettingsScreen() {
         {/* SEÇÃO: APARÊNCIA */}
         <SectionHeader label="Aparência" />
 
-        {/* Aparência */}
+        {/* Aparência — tema: Claro · Escuro · Sistema */}
         <YStack gap="$3">
           <XStack alignItems="center" gap="$2">
             <Moon size={20} color={c.textSecondary} />
@@ -865,33 +871,55 @@ export default function SettingsScreen() {
               Aparência
             </Text>
           </XStack>
-          <XStack
+          <YStack
             bg={c.bgSubtle}
             borderWidth={1}
             borderColor={c.border}
             p="$3"
             borderRadius="$3"
-            alignItems="center"
-            justifyContent="space-between"
             gap="$3"
           >
-            <YStack f={1} gap="$1">
+            <YStack gap="$1">
               <Text fontWeight="700" fontSize={14} color={c.text}>
-                Modo Escuro
+                Tema
               </Text>
               <Text fontSize={12} color={c.textSecondary}>
-                {isDark ? 'Tema escuro ativado' : 'Tema claro ativado'}
+                {themeMode === 'system'
+                  ? `Segue o sistema (agora: ${isDark ? 'escuro' : 'claro'})`
+                  : themeMode === 'dark'
+                  ? 'Escuro fixo'
+                  : 'Claro fixo'}
               </Text>
             </YStack>
-            <Switch
-              value={isDark}
-              onValueChange={() => toggleTheme()}
-              trackColor={{ false: c.borderInput, true: c.primary }}
-              thumbColor={isDark ? c.primary : c.bgCard}
-              accessibilityLabel="Modo escuro"
-              accessibilityHint={isDark ? 'Desativar tema escuro' : 'Ativar tema escuro'}
-            />
-          </XStack>
+            <XStack gap="$2" accessibilityRole="radiogroup" accessibilityLabel="Tema">
+              {THEME_OPTIONS.map((opt) => {
+                const selected = themeMode === opt.value;
+                return (
+                  <Pressable
+                    key={opt.value}
+                    onPress={() => { void setThemeMode(opt.value); }}
+                    accessibilityRole="radio"
+                    accessibilityLabel={opt.label}
+                    accessibilityState={{ checked: selected, selected }}
+                    style={{
+                      flex: 1,
+                      minHeight: 44,
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                      borderRadius: 999,
+                      borderWidth: 1,
+                      borderColor: selected ? c.primary : c.borderInput,
+                      backgroundColor: selected ? c.primary : 'transparent',
+                    }}
+                  >
+                    <Text fontSize={13} fontWeight="700" color={selected ? c.textOnAccent : c.text}>
+                      {opt.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </XStack>
+          </YStack>
         </YStack>
 
         {/* SEÇÃO: MODELO DE IA */}
@@ -947,7 +975,7 @@ export default function SettingsScreen() {
                         bg={isOR ? c.bgYellowSoft : c.bgGreenSoft}
                       >
                         <Text
-                          fontSize={9}
+                          fontSize={12}
                           fontWeight="700"
                           color={isOR ? c.accentOrange : c.accentGreenDark}
                           letterSpacing={0.5}
@@ -955,7 +983,7 @@ export default function SettingsScreen() {
                           {isOR ? 'OPENROUTER' : 'OPENAI'}
                         </Text>
                       </XStack>
-                      <Text fontSize={10} color={c.textSecondary}>
+                      <Text fontSize={12} color={c.textSecondary}>
                         {m.costHint}
                       </Text>
                     </XStack>
@@ -1018,7 +1046,7 @@ export default function SettingsScreen() {
                         bg={isOR ? c.bgYellowSoft : c.bgGreenSoft}
                       >
                         <Text
-                          fontSize={9}
+                          fontSize={12}
                           fontWeight="700"
                           color={isOR ? c.accentOrange : c.accentGreenDark}
                           letterSpacing={0.5}
@@ -1026,7 +1054,7 @@ export default function SettingsScreen() {
                           {isOR ? 'OPENROUTER' : 'OPENAI'}
                         </Text>
                       </XStack>
-                      <Text fontSize={10} color={c.textSecondary}>
+                      <Text fontSize={12} color={c.textSecondary}>
                         {m.costHint}
                       </Text>
                     </XStack>
@@ -1120,7 +1148,7 @@ export default function SettingsScreen() {
               OpenAI API Key
             </Text>
             {openaiMode === 'proxy' && (
-              <Text fontSize={11} color={c.textSecondary}>
+              <Text fontSize={12} color={c.textSecondary}>
                 (não usada no modo seguro)
               </Text>
             )}
@@ -1207,7 +1235,7 @@ export default function SettingsScreen() {
             </Text>
             {AVAILABLE_MODELS.find((m) => m.id === model)?.provider === 'openrouter' ? (
               <XStack px="$1.5" py={2} borderRadius={6} bg={c.bgYellowSoft}>
-                <Text fontSize={9} fontWeight="700" color={c.accentOrange} letterSpacing={0.5}>
+                <Text fontSize={12} fontWeight="700" color={c.accentOrange} letterSpacing={0.5}>
                   ATIVO
                 </Text>
               </XStack>
@@ -1324,14 +1352,14 @@ export default function SettingsScreen() {
                 gap="$1"
                 alignItems="flex-start"
               >
-                <Text fontSize={10} color={c.accentRed} fontWeight="700">⚠️</Text>
-                <Text fontSize={11} color={c.accentRed} flex={1} lineHeight={15}>
+                <Text fontSize={12} color={c.accentRedText} fontWeight="700">⚠️</Text>
+                <Text fontSize={12} color={c.accentRedText} flex={1} lineHeight={15}>
                   URLs externas devem usar HTTPS para proteger dados em trânsito.
                 </Text>
               </XStack>
             )}
             {evoPadConfig.baseUrl.trim() && validateEvoPadUrl(evoPadConfig.baseUrl) && (
-              <Text fontSize={11} color={c.accentRed}>
+              <Text fontSize={12} color={c.accentRedText}>
                 {validateEvoPadUrl(evoPadConfig.baseUrl)}
               </Text>
             )}
@@ -1364,7 +1392,7 @@ export default function SettingsScreen() {
             />
             {evoPadConfig.importToken.trim() &&
               validateEvoPadToken(evoPadConfig.importToken) && (
-              <Text fontSize={11} color={c.accentOrange}>
+              <Text fontSize={12} color={c.accentOrange}>
                 {validateEvoPadToken(evoPadConfig.importToken)}
               </Text>
             )}
@@ -1425,7 +1453,7 @@ export default function SettingsScreen() {
                     evoPadTestStatus === 'ok'
                       ? c.primary
                       : evoPadTestStatus === 'fail'
-                      ? c.accentRed
+                      ? c.accentRedText
                       : c.textSecondary
                   }
                 >
@@ -1464,7 +1492,7 @@ export default function SettingsScreen() {
             </Pressable>
           </XStack>
 
-          <Text fontSize={11} color={c.textMuted} lineHeight={16}>
+          <Text fontSize={12} color={c.textMuted} lineHeight={16}>
             Token gerado automaticamente no .env do EvoPad. Procure a linha IMPORT_TOKEN
             e cole aqui. A URL padrão funciona se o EvoPad roda no mesmo Mac.
           </Text>
@@ -1481,7 +1509,7 @@ export default function SettingsScreen() {
               <Text fontWeight="700" fontSize={14} color={c.text}>
                 Bird ID — ICP-Brasil
               </Text>
-              <Text fontSize={11} color={c.textSecondary}>
+              <Text fontSize={12} color={c.textSecondary}>
                 signature_session OAuth
               </Text>
             </YStack>
@@ -1498,19 +1526,19 @@ export default function SettingsScreen() {
               alignItems="center"
               gap="$2"
             >
-              <BadgeCheck size={16} color="#16a34a" />
+              <BadgeCheck size={16} color="#15803d" />
               <YStack f={1}>
-                <Text fontWeight="700" fontSize={13} color="#16a34a">
+                <Text fontWeight="700" fontSize={13} color="#15803d">
                   {birdIdUserInfo.name || 'Titular verificado'}
                 </Text>
                 <XStack gap="$2" flexWrap="wrap">
                   {birdIdUserInfo.cpf ? (
-                    <Text fontSize={11} color={c.textSecondary}>
+                    <Text fontSize={12} color={c.textSecondary}>
                       CPF: {birdIdUserInfo.cpf}
                     </Text>
                   ) : null}
                   {birdIdUserInfo.expiresAt ? (
-                    <Text fontSize={11} color={c.textSecondary}>
+                    <Text fontSize={12} color={c.textSecondary}>
                       · válida até {formatSessionExpiry(birdIdUserInfo.expiresAt)}
                     </Text>
                   ) : null}
@@ -1535,7 +1563,7 @@ export default function SettingsScreen() {
                 <Text fontWeight="700" fontSize={13} color="#dc2626">
                   Sessão expirada
                 </Text>
-                <Text fontSize={11} color={c.textSecondary}>
+                <Text fontSize={12} color={c.textSecondary}>
                   Gere uma nova signature_session no portal Bird ID.
                 </Text>
               </YStack>
@@ -1634,11 +1662,11 @@ export default function SettingsScreen() {
                 gap="$1"
                 opacity={!birdIdToken.trim() ? 0.5 : 1}
               >
-                <Check size={14} color={birdIdSaved ? '#16a34a' : c.textOnAccent} />
+                <Check size={14} color={birdIdSaved ? '#15803d' : c.textOnAccent} />
                 <Text
                   fontSize={12}
                   fontWeight="700"
-                  color={birdIdSaved ? '#16a34a' : c.textOnAccent}
+                  color={birdIdSaved ? '#15803d' : c.textOnAccent}
                 >
                   {birdIdSaved ? 'Salvo!' : 'Salvar'}
                 </Text>
@@ -1646,7 +1674,7 @@ export default function SettingsScreen() {
             </Pressable>
           </XStack>
 
-          <Text fontSize={11} color={c.textMuted} lineHeight={16}>
+          <Text fontSize={12} color={c.textMuted} lineHeight={16}>
             A signature_session é um token OAuth emitido pelo Bird ID que
             permite múltiplas assinaturas ICP-Brasil enquanto estiver dentro
             do prazo de validade ou não for revogada. Obtida no portal
@@ -1769,7 +1797,7 @@ export default function SettingsScreen() {
                   {lgpdAccepted ? 'Consentimento LGPD ativo' : 'Consentimento pendente'}
                 </Text>
                 {lgpdAccepted && lgpdAcceptedAt && (
-                  <Text fontSize={11} color={c.textSecondary}>
+                  <Text fontSize={12} color={c.textSecondary}>
                     Aceito em{' '}
                     {new Date(lgpdAcceptedAt).toLocaleDateString('pt-BR', {
                       day: '2-digit',
@@ -1819,7 +1847,7 @@ export default function SettingsScreen() {
                   gap="$2"
                 >
                   <Trash2 size={14} color={c.accentRed} />
-                  <Text fontSize={13} color={c.accentRed} fontWeight="600">
+                  <Text fontSize={13} color={c.accentRedText} fontWeight="600">
                     Revogar consentimento
                   </Text>
                 </XStack>

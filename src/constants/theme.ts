@@ -71,8 +71,8 @@ export const Colors = {
     text: W.black,
     textSecondary: W.t700,
     textLabel: W.black,
-    textPlaceholder: W.taupe,
-    textMuted: W.t600,
+    textPlaceholder: '#6e685b', // 5.5:1 sobre creme (WCAG AA)
+    textMuted: '#6b6558', // 5.8:1 sobre creme (WCAG AA)
     textInverse: W.cream,
     textOnAccent: W.cream,         // texto claro sobre preto/queimado/vermilion
 
@@ -90,6 +90,7 @@ export const Colors = {
     secondary: W.burnt,            // #c2410c — rótulos/seções/ações secundárias (legível)
     accentBlue: W.burnt,           // #c2410c — acento informativo (reaproveitado, quente)
     accentRed: W.vermilion,        // #ff3f00 — destrutivo / estado de gravação
+    accentRedText: '#c0392b', // texto/rótulo de erro: 5.4:1 sobre creme
     accentOrange: W.orange,        // #ff7f11 — laranja vivo de destaque
     accentYellow: W.burnt,         // #c2410c — texto de aviso legível
     accentNavy: W.t800,            // #2e2b26
@@ -125,7 +126,7 @@ export const Colors = {
     text: G[100],
     textSecondary: G[300],
     textLabel: G[100],
-    textPlaceholder: G[600],
+    textPlaceholder: '#8a939b', // 4.9:1 sobre G900 (WCAG AA)
     textMuted: G[500],
     textInverse: G[900],
     textOnAccent: G[900],
@@ -144,6 +145,7 @@ export const Colors = {
     secondary: G[500],             // #adb5bd
     accentBlue: G[300],            // #dee2e6
     accentRed: '#e74c3c',          // brighter red for visibility on dark
+    accentRedText: '#ff7a6b', // texto de erro no escuro: 6.1:1 sobre G900
     accentOrange: G[500],
     accentYellow: G[500],
     accentNavy: G[300],
@@ -183,25 +185,25 @@ export type ThemeColor = keyof ColorPalette;
 //   - Code → 'DM Mono'.
 export const Fonts = Platform.select({
   ios: {
-    sans: 'DM Sans',           // body, captions
+    sans: 'DMSans_400Regular',           // body, captions
     serif: 'New York',          // titles, headings
-    display: 'Lora',            // numeric display (timer)
+    display: 'Lora_400Regular',            // numeric display (timer)
     rounded: 'ui-rounded',
-    mono: 'DM Mono',
+    mono: 'DMMono_400Regular',
   },
   default: {
-    sans: 'DM Sans',
+    sans: 'DMSans_400Regular',
     serif: 'Georgia',
-    display: 'Lora',
+    display: 'Lora_400Regular',
     rounded: 'normal',
     mono: 'monospace',
   },
   web: {
-    sans: "'DM Sans', sans-serif",
+    sans: 'DMSans_400Regular',
     serif: "'New York', ui-serif, Georgia, serif",
-    display: "'Lora', Georgia, serif",
+    display: 'Lora_400Regular',
     rounded: 'var(--font-rounded)',
-    mono: "'DM Mono', monospace",
+    mono: 'DMMono_400Regular',
   },
 });
 

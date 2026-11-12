@@ -211,7 +211,7 @@ export default function TemplatesScreen() {
                 accessibilityLabel="Prompt do sistema"
                 accessibilityHint="Instrução que a IA receberá ao processar gravações com este template"
               />
-              <Text color={c.textMuted} fontSize={11} textAlign="right">{systemPrompt.length}/3000 caracteres</Text>
+              <Text color={c.textMuted} fontSize={12} textAlign="right">{systemPrompt.length}/3000 caracteres</Text>
             </YStack>
 
             <YStack
@@ -271,7 +271,7 @@ export default function TemplatesScreen() {
           {/* Seção: Custom */}
           {customTemplates.length > 0 && (
             <YStack gap="$2">
-              <Text color={c.textSecondary} fontSize={11} fontWeight="700">
+              <Text color={c.textSecondary} fontSize={12} fontWeight="700">
                 SEUS TEMPLATES
               </Text>
               {customTemplates.map((t) => (
@@ -318,7 +318,7 @@ export default function TemplatesScreen() {
 
           {/* Seção: Built-in */}
           <YStack gap="$2" mt="$2">
-            <Text color={c.textSecondary} fontSize={11} fontWeight="700">
+            <Text color={c.textSecondary} fontSize={12} fontWeight="700">
               TEMPLATES PADRÃO
             </Text>
             {BUILTIN_TEMPLATES.map((t) => (
@@ -335,7 +335,7 @@ export default function TemplatesScreen() {
                     {t.name}
                   </Text>
                   <XStack bg={c.bgBlueSoft} px="$2" py={2} borderRadius={999} borderWidth={1} borderColor={c.borderBlue}>
-                    <Text fontSize={9} fontWeight="700" color={c.secondary}>PADRÃO</Text>
+                    <Text fontSize={12} fontWeight="700" color={c.secondary}>PADRÃO</Text>
                   </XStack>
                 </XStack>
                 <Text fontSize={13} color={c.textSecondary}>
