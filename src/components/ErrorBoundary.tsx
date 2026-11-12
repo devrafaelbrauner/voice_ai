@@ -100,9 +100,9 @@ const styles = StyleSheet.create({
     gap: 6,
     marginTop: 8,
   },
-  errorLabel: { fontSize: 11, fontWeight: '700', color: '#c2410c', letterSpacing: 1 },
+  errorLabel: { fontSize: 12, fontWeight: '700', color: '#c2410c', letterSpacing: 1 },
   errorText: { fontSize: 13, color: '#000000', fontWeight: '600' },
-  stackText: { fontSize: 11, color: '#8c8676', marginTop: 6 },
+  stackText: { fontSize: 12, color: '#8c8676', marginTop: 6 },
   button: {
     backgroundColor: '#000000',
     borderRadius: 12,

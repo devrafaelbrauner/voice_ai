@@ -312,8 +312,8 @@ export default function PatientHistoryScreen() {
               alignItems="center"
               gap="$1"
             >
-              <FileText size={12} color="#16a34a" />
-              <Text fontSize={12} color="#16a34a" fontWeight="600">
+              <FileText size={12} color="#15803d" />
+              <Text fontSize={12} color="#15803d" fontWeight="600">
                 {stats.withSummary} processada(s) com IA
               </Text>
             </XStack>
@@ -408,7 +408,7 @@ export default function PatientHistoryScreen() {
                 {/* Card */}
                 <YStack f={1} pb="$4">
                   {/* Date */}
-                  <Text fontSize={11} color={c.textMuted} fontWeight="700" mb="$2">
+                  <Text fontSize={12} color={c.textMuted} fontWeight="700" mb="$2">
                     {formatDateTime(item.createdAt)}
                   </Text>
 
@@ -435,7 +435,7 @@ export default function PatientHistoryScreen() {
                           {displayName}
                         </Text>
                         {!item.localFileExists && (
-                          <Text fontSize={11} color={c.textPlaceholder}>
+                          <Text fontSize={12} color={c.textPlaceholder}>
                             Áudio não está neste dispositivo
                           </Text>
                         )}
@@ -447,7 +447,7 @@ export default function PatientHistoryScreen() {
                           px="$2"
                           py="$1"
                         >
-                          <Text fontSize={10} color={c.secondary} fontWeight="700">
+                          <Text fontSize={12} color={c.secondary} fontWeight="700">
                             {templateName.toUpperCase()}
                           </Text>
                         </XStack>
@@ -484,7 +484,7 @@ export default function PatientHistoryScreen() {
                             </Text>
                             <XStack gap="$2" alignItems="center">
                               {copiedKey === copySmKey ? (
-                                <Text fontSize={11} color={c.primary} fontWeight="700">
+                                <Text fontSize={12} color={c.primary} fontWeight="700">
                                   Copiado!
                                 </Text>
                               ) : (
@@ -559,7 +559,7 @@ export default function PatientHistoryScreen() {
                             </Text>
                             <XStack gap="$2" alignItems="center">
                               {copiedKey === copyTxKey ? (
-                                <Text fontSize={11} color={c.primary} fontWeight="700">
+                                <Text fontSize={12} color={c.primary} fontWeight="700">
                                   Copiado!
                                 </Text>
                               ) : (

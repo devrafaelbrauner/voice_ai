@@ -31,6 +31,7 @@ import {
   X,
 } from 'lucide-react-native';
 import { useColors } from '../context/ThemeContext';
+import { useReduceMotion } from '../hooks/useReduceMotion';
 
 const SEEN_KEY = '@voice_ai_recorder/onboarding_seen/v1';
 const { width: SCREEN_W } = Dimensions.get('window');
@@ -57,6 +58,7 @@ export function OnboardingModal({ visible, onDismiss }: Props) {
   const router = useRouter();
   const [step, setStep] = useState(0);
   const slideAnim = useRef(new Animated.Value(0)).current;
+  const reduceMotion = useReduceMotion();
 
   const slides: Slide[] = [
     {
@@ -77,7 +79,7 @@ export function OnboardingModal({ visible, onDismiss }: Props) {
       hint: 'Você também pode criar templates personalizados.',
     },
     {
-      icon: <ShieldCheck size={56} color="#16a34a" strokeWidth={1.5} />,
+      icon: <ShieldCheck size={56} color="#15803d" strokeWidth={1.5} />,
       title: 'Como funciona a IA',
       body: 'Faça login para usar o modo seguro: sua chave OpenAI fica no servidor, nunca exposta no app.\n\nOu configure sua própria API key em Configurações.',
     },
@@ -87,7 +89,7 @@ export function OnboardingModal({ visible, onDismiss }: Props) {
     if (step < slides.length - 1) {
       Animated.timing(slideAnim, {
         toValue: -(step + 1) * SCREEN_W,
-        duration: 260,
+        duration: reduceMotion ? 0 : 260,
         useNativeDriver: true,
       }).start();
       setStep(step + 1);

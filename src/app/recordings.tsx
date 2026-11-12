@@ -123,7 +123,7 @@ const swipeStyles = StyleSheet.create({
   },
   actionText: {
     color: '#fff',
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
   },
   pickerBackdrop: {
@@ -883,7 +883,7 @@ export default function RecordingsScreen() {
                 <Text fontSize={13} fontWeight="700" color={c.accentYellow}>
                   {queueCount} transcrição(ões) na fila offline
                 </Text>
-                <Text fontSize={11} color={c.textSecondary}>
+                <Text fontSize={12} color={c.textSecondary}>
                   {isProcessingQueue
                     ? 'Processando agora…'
                     : 'Tentaremos processar quando a conexão retornar.'}
@@ -926,10 +926,10 @@ export default function RecordingsScreen() {
             >
               <Trash2 size={18} color={c.accentRed} />
               <YStack f={1}>
-                <Text fontSize={13} fontWeight="700" color={c.accentRed}>
+                <Text fontSize={13} fontWeight="700" color={c.accentRedText}>
                   {failedCount} transcrição(ões) com falha permanente
                 </Text>
-                <Text fontSize={11} color={c.textSecondary}>
+                <Text fontSize={12} color={c.textSecondary}>
                   Arquivo ausente ou muitas tentativas sem sucesso.
                 </Text>
               </YStack>
@@ -969,7 +969,7 @@ export default function RecordingsScreen() {
         >
           <User size={18} color={c.accentBlue} />
           <YStack f={1}>
-            <Text fontSize={11} color={c.accentNavy} fontWeight="600">
+            <Text fontSize={12} color={c.accentNavy} fontWeight="600">
               FILTRANDO POR PACIENTE
             </Text>
             <Text fontSize={14} color={c.accentBlue} fontWeight="700">
@@ -1064,7 +1064,7 @@ export default function RecordingsScreen() {
                 {showFilters ? '▼ Filtros Avançados' : '▶ Filtros Avançados'}
               </Text>
               {selectedTemplates.size > 0 || selectedStatuses.size > 0 || dateRange !== 'all' ? (
-                <Text fontSize={11} color={c.primary} fontWeight="700">
+                <Text fontSize={12} color={c.primary} fontWeight="700">
                   {selectedTemplates.size + selectedStatuses.size + (dateRange !== 'all' ? 1 : 0)} filtro(s) ativo(s)
                 </Text>
               ) : null}
@@ -1123,7 +1123,7 @@ export default function RecordingsScreen() {
                   <YStack gap="$2" mt="$2">
                     <XStack gap="$2" alignItems="center">
                       <YStack flex={1} gap="$1">
-                        <Text fontSize={11} color={c.textSecondary}>De</Text>
+                        <Text fontSize={12} color={c.textSecondary}>De</Text>
                         <TextInput
                           value={customDateStart}
                           onChangeText={(t) => setCustomDateStart(autoFormatDateBR(t))}
@@ -1143,7 +1143,7 @@ export default function RecordingsScreen() {
                         />
                       </YStack>
                       <YStack flex={1} gap="$1">
-                        <Text fontSize={11} color={c.textSecondary}>Até</Text>
+                        <Text fontSize={12} color={c.textSecondary}>Até</Text>
                         <TextInput
                           value={customDateEnd}
                           onChangeText={(t) => setCustomDateEnd(autoFormatDateBR(t))}
@@ -1165,7 +1165,7 @@ export default function RecordingsScreen() {
                     </XStack>
                     {(customDateStart || customDateEnd) && (
                       <XStack gap="$2" alignItems="center" justifyContent="space-between">
-                        <Text fontSize={11} color={c.textSecondary}>
+                        <Text fontSize={12} color={c.textSecondary}>
                           {parseDateBR(customDateStart) && parseDateBR(customDateEnd)
                             ? `Filtrando entre ${customDateStart} e ${customDateEnd}`
                             : parseDateBR(customDateStart)
@@ -1182,7 +1182,7 @@ export default function RecordingsScreen() {
                           accessibilityRole="button"
                           accessibilityLabel="Limpar datas personalizadas"
                         >
-                          <Text fontSize={11} color={c.secondary} fontWeight="700">
+                          <Text fontSize={12} color={c.secondary} fontWeight="700">
                             Limpar
                           </Text>
                         </Pressable>
@@ -1507,7 +1507,7 @@ export default function RecordingsScreen() {
                           alignSelf="flex-start"
                           mb="$1"
                         >
-                          <Text fontSize={10} fontWeight="700" color={c.primaryDeep}>
+                          <Text fontSize={12} fontWeight="700" color={c.primaryDeep}>
                             {item.patientName}
                           </Text>
                         </XStack>
@@ -1580,8 +1580,8 @@ export default function RecordingsScreen() {
                       {matchSnippet && matchLabel && (
                         <XStack gap="$1" alignItems="flex-start" mt="$1">
                           <Search size={11} color={c.accentBlue} style={{ marginTop: 2 }} />
-                          <Text fontSize={11} color={c.textSecondary} flex={1} numberOfLines={2}>
-                            <Text fontSize={11} fontWeight="700" color={c.accentBlue}>
+                          <Text fontSize={12} color={c.textSecondary} flex={1} numberOfLines={2}>
+                            <Text fontSize={12} fontWeight="700" color={c.accentBlue}>
                               {matchLabel}:{' '}
                             </Text>
                             {matchSnippet}
@@ -1589,7 +1589,7 @@ export default function RecordingsScreen() {
                         </XStack>
                       )}
                       {!item.localFileExists && (
-                        <Text color={c.textPlaceholder} fontSize={11} mt="$1">
+                        <Text color={c.textPlaceholder} fontSize={12} mt="$1">
                           Áudio não está neste dispositivo
                         </Text>
                       )}
@@ -1603,7 +1603,7 @@ export default function RecordingsScreen() {
                         borderRadius={999}
                         alignItems="center"
                       >
-                        <Text fontSize={11} fontWeight="700" color={c.primary}>
+                        <Text fontSize={12} fontWeight="700" color={c.primary}>
                           ✓ Processado
                         </Text>
                       </XStack>
@@ -1633,7 +1633,7 @@ export default function RecordingsScreen() {
                       borderWidth={1}
                       borderColor={c.borderPurple}
                     >
-                      <Text fontSize={10} fontWeight="700" color={c.primaryDeep}>
+                      <Text fontSize={12} fontWeight="700" color={c.primaryDeep}>
                         {BUILTIN_TEMPLATES.find((t) => t.id === item.templateId)?.name
                           ?? item.templateId}
                       </Text>
@@ -1955,7 +1955,7 @@ export default function RecordingsScreen() {
                         accessibilityRole="button"
                         accessibilityLabel={isExpanded ? 'Fechar preview do template' : `Ver preview do template ${t.name}`}
                       >
-                        <Text fontSize={11} color={c.secondary} fontWeight="600">
+                        <Text fontSize={12} color={c.secondary} fontWeight="600">
                           {isExpanded ? '▲ fechar' : '▼ preview'}
                         </Text>
                       </Pressable>
@@ -1976,10 +1976,10 @@ export default function RecordingsScreen() {
                         borderWidth={1}
                         borderColor={c.borderInput}
                       >
-                        <Text fontSize={10} color={c.textSecondary} fontWeight="700" mb="$1">
+                        <Text fontSize={12} color={c.textSecondary} fontWeight="700" mb="$1">
                           PROMPT DO SISTEMA
                         </Text>
-                        <Text fontSize={11} color={c.textLabel} lineHeight={16} numberOfLines={6}>
+                        <Text fontSize={12} color={c.textLabel} lineHeight={16} numberOfLines={6}>
                           {t.systemPrompt.slice(0, 320)}
                           {t.systemPrompt.length > 320 ? '…' : ''}
                         </Text>
@@ -2232,7 +2232,7 @@ export default function RecordingsScreen() {
             >
               <Text
                 style={{
-                  fontSize: 11,
+                  fontSize: 12,
                   fontWeight: '700',
                   color: c.textMuted,
                   textTransform: 'uppercase',
@@ -2334,7 +2334,7 @@ export default function RecordingsScreen() {
                   <PenLine size={20} color={c.primary} />
                   <YStack f={1}>
                     <Text fontSize={15} color={c.text}>Exportar PDF assinado</Text>
-                    <Text fontSize={11} color={c.textSecondary}>Bird ID · ICP-Brasil</Text>
+                    <Text fontSize={12} color={c.textSecondary}>Bird ID · ICP-Brasil</Text>
                   </YStack>
                 </XStack>
               </Pressable>
@@ -2394,7 +2394,7 @@ export default function RecordingsScreen() {
               >
                 <XStack gap={12} alignItems="center" py={12}>
                   <Trash2 size={20} color={c.accentRed} />
-                  <Text fontSize={15} color={c.accentRed}>Excluir</Text>
+                  <Text fontSize={15} color={c.accentRedText}>Excluir</Text>
                 </XStack>
               </Pressable>
             </View>

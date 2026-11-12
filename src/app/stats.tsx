@@ -1,3 +1,4 @@
+import { useReduceMotion } from '../hooks/useReduceMotion';
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { ScrollView, Pressable, Animated, View } from 'react-native';
 import { YStack, XStack, Text } from 'tamagui';
@@ -61,7 +62,7 @@ function StatCard({
       <Text fontSize={28} fontWeight="900" color={color}>
         {value}
       </Text>
-      <Text fontSize={11} color={c.textSecondary} fontWeight="700">
+      <Text fontSize={12} color={c.textSecondary} fontWeight="700">
         {label.toUpperCase()}
       </Text>
     </YStack>
@@ -82,15 +83,16 @@ function AnimatedBar({
   textColor: string;
 }) {
   const animValue = useRef(new Animated.Value(0)).current;
+  const reduceMotion = useReduceMotion();
   const targetWidth = maxCount > 0 ? (count / maxCount) * 100 : 0;
 
   useEffect(() => {
     Animated.timing(animValue, {
       toValue: targetWidth,
-      duration: 400,
+      duration: reduceMotion ? 0 : 400,
       useNativeDriver: false,
     }).start();
-  }, [targetWidth]);
+  }, [targetWidth, reduceMotion]);
 
   const widthInterpolated = animValue.interpolate({
     inputRange: [0, 100],
@@ -123,13 +125,13 @@ function AnimatedBar({
         }}
       >
         {count > 0 && (
-          <Text style={{ fontSize: 11, fontWeight: '700', color: '#fff' }}>
+          <Text style={{ fontSize: 12, fontWeight: '700', color: '#fff' }}>
             {count}
           </Text>
         )}
       </Animated.View>
       {count === 0 && (
-        <Text style={{ fontSize: 11, fontWeight: '700', color: textColor, paddingLeft: 6 }}>
+        <Text style={{ fontSize: 12, fontWeight: '700', color: textColor, paddingLeft: 6 }}>
           0
         </Text>
       )}
@@ -424,7 +426,7 @@ export default function StatsScreen() {
           <YStack gap="$2" mt="$1">
             {stats.perDay.map((d, i) => (
               <XStack key={`${period}-${i}`} alignItems="center" gap="$3">
-                <Text fontSize={11} color={c.textSecondary} w={44}>
+                <Text fontSize={12} color={c.textSecondary} w={44}>
                   {d.day}
                 </Text>
                 <AnimatedBar
@@ -540,7 +542,7 @@ export default function StatsScreen() {
               borderRadius="$4"
               gap="$2"
             >
-              <Text fontSize={11} color={c.primaryDeep} fontWeight="700">
+              <Text fontSize={12} color={c.primaryDeep} fontWeight="700">
                 TOTAL GASTO
               </Text>
               <XStack alignItems="baseline" gap="$2">
@@ -565,7 +567,7 @@ export default function StatsScreen() {
             {/* Breakdown por operação */}
             {stats.apiUsage.byOperation.length > 0 && (
               <YStack gap="$2" mt="$2">
-                <Text fontSize={11} color={c.textSecondary} fontWeight="700">
+                <Text fontSize={12} color={c.textSecondary} fontWeight="700">
                   POR OPERAÇÃO
                 </Text>
                 {stats.apiUsage.byOperation.map((op, i) => {
@@ -591,7 +593,7 @@ export default function StatsScreen() {
                         <Text fontSize={13} fontWeight="700" color={c.text}>
                           {label}
                         </Text>
-                        <Text fontSize={11} color={c.textSecondary}>
+                        <Text fontSize={12} color={c.textSecondary}>
                           {op.calls} chamada{op.calls !== 1 ? 's' : ''}
                         </Text>
                       </YStack>
@@ -607,7 +609,7 @@ export default function StatsScreen() {
             {/* Breakdown por modelo */}
             {stats.apiUsage.byModel.length > 0 && (
               <YStack gap="$2" mt="$2">
-                <Text fontSize={11} color={c.textSecondary} fontWeight="700">
+                <Text fontSize={12} color={c.textSecondary} fontWeight="700">
                   POR MODELO
                 </Text>
                 {stats.apiUsage.byModel.map((m, i) => (
@@ -625,7 +627,7 @@ export default function StatsScreen() {
                       <Text fontSize={13} fontWeight="700" color={c.text}>
                         {m.model}
                       </Text>
-                      <Text fontSize={11} color={c.textSecondary}>
+                      <Text fontSize={12} color={c.textSecondary}>
                         {m.calls} chamada{m.calls !== 1 ? 's' : ''}
                       </Text>
                     </YStack>
@@ -646,7 +648,7 @@ export default function StatsScreen() {
                 borderRadius="$3"
                 gap="$1"
               >
-                <Text fontSize={10} color={c.secondary} fontWeight="700">
+                <Text fontSize={12} color={c.secondary} fontWeight="700">
                   ÁUDIO TRANSCRITO
                 </Text>
                 <Text fontSize={20} fontWeight="900" color={c.secondary}>
@@ -660,7 +662,7 @@ export default function StatsScreen() {
                 borderRadius="$3"
                 gap="$1"
               >
-                <Text fontSize={10} color={c.accentYellow} fontWeight="700">
+                <Text fontSize={12} color={c.accentYellow} fontWeight="700">
                   TOKENS DE TEXTO
                 </Text>
                 <Text fontSize={20} fontWeight="900" color={c.accentYellow}>
@@ -669,7 +671,7 @@ export default function StatsScreen() {
               </YStack>
             </XStack>
 
-            <Text fontSize={10} color={c.textPlaceholder} mt="$2" textAlign="center">
+            <Text fontSize={12} color={c.textPlaceholder} mt="$2" textAlign="center">
               Cotação aprox. R$5,50/USD. Preços oficiais: Whisper $0.006/min •
               GPT-4o mini $0.15/1M in + $0.60/1M out • GPT-4o $2.50/1M in +
               $10.00/1M out

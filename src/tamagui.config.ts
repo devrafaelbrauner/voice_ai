@@ -11,13 +11,13 @@ const serifFamily = Platform.select({
 }) as string;
 
 const displayFamily = Platform.select({
-  ios: 'Lora',
-  default: 'Lora',
+  ios: 'Lora_400Regular',
+  default: 'Lora_400Regular',
 }) as string;
 
 const sansFamily = Platform.select({
-  ios: 'DM Sans',
-  default: 'DM Sans',
+  ios: 'DMSans_400Regular',
+  default: 'DMSans_400Regular',
 }) as string;
 
 const sizeScale = {
@@ -80,11 +80,26 @@ const serifFont = createFont({
 const sansFont = createFont({
   family: sansFamily,
   ...baseFontMeta,
+  // Pesos reais carregados em _layout.tsx (useFonts). Sem isso o RN faz negrito sintético.
+  face: {
+    400: { normal: 'DMSans_400Regular' },
+    500: { normal: 'DMSans_500Medium' },
+    600: { normal: 'DMSans_600SemiBold' },
+    700: { normal: 'DMSans_700Bold' },
+    800: { normal: 'DMSans_800ExtraBold' },
+  },
 });
 
 const displayFont = createFont({
   family: displayFamily,
   ...baseFontMeta,
+  face: {
+    400: { normal: 'Lora_400Regular' },
+    500: { normal: 'Lora_500Medium' },
+    600: { normal: 'Lora_600SemiBold' },
+    700: { normal: 'Lora_700Bold' },
+    800: { normal: 'Lora_700Bold' }, // Lora não tem peso 800
+  },
 });
 
 const config = createTamagui({

@@ -159,7 +159,7 @@ export function LGPDConsentModal({ visible, onAccept }: Props) {
                 <Text style={{ fontSize: 12, fontWeight: '600', color: c.text }}>
                   Exercer seus direitos
                 </Text>
-                <Text style={{ fontSize: 11, color: c.textSecondary }}>
+                <Text style={{ fontSize: 12, color: c.textSecondary }}>
                   Para acessar, corrigir, excluir ou exportar seus dados, entre em contato com o desenvolvedor via configurações do aplicativo.
                 </Text>
               </YStack>
@@ -177,7 +177,7 @@ export function LGPDConsentModal({ visible, onAccept }: Props) {
               borderTopColor: c.border,
             }}
           >
-            <Text style={{ fontSize: 11, color: c.textSecondary, textAlign: 'center' }}>
+            <Text style={{ fontSize: 12, color: c.textSecondary, textAlign: 'center' }}>
               Ao aceitar, você autoriza o tratamento dos dados acima para os fins descritos,
               conforme a Lei Geral de Proteção de Dados (LGPD — Lei nº 13.709/2018).
             </Text>

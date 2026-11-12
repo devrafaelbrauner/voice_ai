@@ -11,6 +11,25 @@ import { AndroidActionSheetProvider } from '../components/ActionSheet';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { OnboardingModal, useOnboarding } from '../components/OnboardingModal';
 import { ErrorBoundary } from '../components/ErrorBoundary';
+import { useFonts } from 'expo-font';
+import * as SplashScreen from 'expo-splash-screen';
+import {
+  DMSans_400Regular,
+  DMSans_500Medium,
+  DMSans_600SemiBold,
+  DMSans_700Bold,
+  DMSans_800ExtraBold,
+} from '@expo-google-fonts/dm-sans';
+import {
+  Lora_400Regular,
+  Lora_500Medium,
+  Lora_600SemiBold,
+  Lora_700Bold,
+} from '@expo-google-fonts/lora';
+import { DMMono_400Regular } from '@expo-google-fonts/dm-mono';
+
+// Segura a splash até as fontes do design system carregarem (ver RootLayout).
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 function ThemeAwareLayout() {
   const isDark = useThemeStore((state) => state.isDark);
@@ -55,6 +74,27 @@ function ThemeAwareLayout() {
 }
 
 export default function RootLayout() {
+  const [fontsLoaded, fontError] = useFonts({
+    DMSans_400Regular,
+    DMSans_500Medium,
+    DMSans_600SemiBold,
+    DMSans_700Bold,
+    DMSans_800ExtraBold,
+    Lora_400Regular,
+    Lora_500Medium,
+    Lora_600SemiBold,
+    Lora_700Bold,
+    DMMono_400Regular,
+  });
+
+  useEffect(() => {
+    if (fontsLoaded || fontError) SplashScreen.hideAsync().catch(() => {});
+  }, [fontsLoaded, fontError]);
+
+  // Sem esperar as fontes, a UI aparece com a fonte do sistema e troca depois.
+  // Se o carregamento falhar, segue com a fonte do sistema.
+  if (!fontsLoaded && !fontError) return null;
+
   return (
     <ErrorBoundary>
       <GestureHandlerRootView style={{ flex: 1 }}>

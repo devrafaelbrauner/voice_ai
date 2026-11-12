@@ -156,42 +156,6 @@ export default function RecordScreen() {
           >
             {formatTime(duration)}
           </Text>
-          {isPaused && (
-            <XStack
-              style={glass(0.55, 16, isDark)}
-              paddingHorizontal="$3"
-              paddingVertical="$1"
-              borderRadius={999}
-            >
-              <Text
-                color={c.secondary}
-                fontSize={9}
-                fontWeight="700"
-                letterSpacing={2}
-              >
-                PAUSADO
-              </Text>
-            </XStack>
-          )}
-          {isRecording && !isPaused && (
-            <XStack
-              backgroundColor="rgba(192,57,43,0.10)"
-              paddingHorizontal="$3"
-              paddingVertical="$1"
-              borderRadius={999}
-              borderWidth={1}
-              borderColor="rgba(192,57,43,0.28)"
-            >
-              <Text
-                color="#c0392b"
-                fontSize={9}
-                fontWeight="700"
-                letterSpacing={2}
-              >
-                ● GRAVANDO
-              </Text>
-            </XStack>
-          )}
         </YStack>
 
         <WaveformLive data={waveformData} />
@@ -202,12 +166,6 @@ export default function RecordScreen() {
           isTransitioning={isTransitioning}
           onPress={isRecording ? stopRecording : startRecording}
         />
-
-        {!isRecording && (
-          <Text color={c.textMuted} fontSize={13} fontWeight="500" letterSpacing={0.5}>
-            Toque para gravar
-          </Text>
-        )}
 
         {isRecording && (
           <XStack gap="$3" alignItems="center">
@@ -221,6 +179,8 @@ export default function RecordScreen() {
                 bg={isPaused ? 'rgba(52,58,64,0.70)' : '#343a40'}
                 paddingHorizontal={22}
                 paddingVertical={8}
+                minHeight={44}
+                justifyContent="center"
                 borderRadius={999}
                 alignItems="center"
                 gap="$2"
@@ -246,15 +206,17 @@ export default function RecordScreen() {
                 <XStack
                   bg="rgba(192,57,43,0.10)"
                   borderWidth={1}
-                  borderColor="#c0392b"
+                  borderColor={c.accentRedText}
                   paddingHorizontal={18}
                   paddingVertical={8}
+                  minHeight={44}
+                  justifyContent="center"
                   borderRadius={999}
                   alignItems="center"
                   gap="$2"
                 >
-                  <Trash2 size={14} color="#c0392b" />
-                  <Text color="#c0392b" fontWeight="700" fontSize={12} letterSpacing={1}>
+                  <Trash2 size={14} color={c.accentRedText} />
+                  <Text color={c.accentRedText} fontWeight="700" fontSize={12} letterSpacing={1}>
                     DESCARTAR
                   </Text>
                 </XStack>
