@@ -21,6 +21,9 @@
 ### Testes
 - Suíte jest-expo (`npm test`): 196 testes de backup v2, banco/tombstones (SQL real via `node:sqlite`), sync, motor de transcrição e fila; 26 mutantes de produto detectados. Requer Node >= 22.
 
+### Limpeza
+- `tsc --noEmit` sem erros (declaração de `*.module.css`), lint sem erros; removidos `transcribeViaProxy` morto e código não usado em Config/Gravações; `Retry-After` não inteiro/negativo é ignorado (antes virava espera de 0 ms); README/TEST_REPORT/IMPLEMENTATION_STATUS corrigidos.
+
 ### Corrigido
 - Edge Functions `openai-chat` e `openai-transcribe`: `json()` referenciava `corsHeaders` fora de escopo (ReferenceError em toda resposta de erro).
 - `gpt-5.4-mini` aceito no proxy (`max_completion_tokens`, sem `temperature`); custo reportado 0 até o preço ser confirmado.
