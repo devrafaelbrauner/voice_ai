@@ -82,6 +82,8 @@ declare global {
 }
 
 let sleeps: number[];
+let getSessionSpy: jest.SpyInstance;
+const originalSupabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
 
 beforeEach(async () => {
   jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
@@ -97,6 +99,9 @@ beforeEach(async () => {
     jest.setSystemTime(Date.now() + ms);
   };
   (isProxyAvailable as jest.Mock).mockResolvedValue(false);
+  // Padrão: sem sessão e sem URL. Cada teste de proxy declara o que precisa (nada depende de ordem).
+  getSessionSpy = jest.spyOn(supabase.auth, 'getSession').mockResolvedValue({ data: { session: null }, error: null } as never);
+  delete process.env.EXPO_PUBLIC_SUPABASE_URL;
   await setForceDirect(false);
   await setApiKey(OPENAI_KEY);
   await setOpenRouterApiKey(OPENROUTER_KEY);
@@ -106,6 +111,9 @@ beforeEach(async () => {
 
 afterEach(() => {
   Object.assign(engineEnv, originalEnv);
+  getSessionSpy.mockRestore();
+  if (originalSupabaseUrl === undefined) delete process.env.EXPO_PUBLIC_SUPABASE_URL;
+  else process.env.EXPO_PUBLIC_SUPABASE_URL = originalSupabaseUrl;
   jest.useRealTimers();
 });
 
@@ -364,6 +372,7 @@ describe('a cadeia nunca troca de provedor', () => {
   });
 
   test('modo proxy sem sessão: falha fechado — não usa a chave direta da OpenAI', async () => {
+    process.env.EXPO_PUBLIC_SUPABASE_URL = 'https://proj.supabase.co'; // URL presente: só falta a sessão
     (isProxyAvailable as jest.Mock).mockResolvedValue(true);
     const err = await thrown(transcribeWithChain(AUDIO, 'whisper-1'));
     expect(err).toMatchObject({ kind: 'invalid_key', code: 'no_credential' });
@@ -373,7 +382,7 @@ describe('a cadeia nunca troca de provedor', () => {
   test('modo proxy com sessão: vai ao proxy com o JWT, nunca com a chave da OpenAI', async () => {
     process.env.EXPO_PUBLIC_SUPABASE_URL = 'https://proj.supabase.co';
     (isProxyAvailable as jest.Mock).mockResolvedValue(true);
-    supabase.auth.getSession = jest.fn(async () => ({ data: { session: { access_token: 'jwt-123' } } })) as never;
+    getSessionSpy.mockResolvedValue({ data: { session: { access_token: 'jwt-123' } }, error: null } as never);
     script(ok(GOOD_TEXT));
     await transcribeWithChain(AUDIO, 'whisper-1');
     expect(calls()).toEqual([

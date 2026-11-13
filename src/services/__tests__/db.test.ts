@@ -211,7 +211,7 @@ describe('tombstones de exclusão', () => {
     expect(await db.getPendingDeletions()).toEqual([]);
   });
 
-  test('filterLiveKeys: só chaves com linha e sem tombstone; funciona acima de 400 chaves', async () => {
+  test('filterLiveKeys: só chaves com linha e sem tombstone; resultado correto com muitas chaves', async () => {
     await insertRecording('live.m4a', { transcript: 't' });
     await insertRecording('dead.m4a', { transcript: 't' });
     await db.deleteRecordingMeta('dead.m4a');
@@ -223,6 +223,25 @@ describe('tombstones de exclusão', () => {
     await insertRecording('late.m4a', { transcript: 't' });
     const live2 = await db.filterLiveKeys('recording', [...many, 'late.m4a']);
     expect([...live2]).toEqual(['late.m4a']);
+  });
+
+  test('filterLiveKeys nunca manda mais de ~401 parâmetros por SQL (limite de variáveis do SQLite do aparelho)', async () => {
+    // O node:sqlite aceita milhares de variáveis, então só olhar o resultado não pega a falta de chunk:
+    // o contrato é o tamanho de cada chamada (o SQLite embarcado no Android antigo limita a 999).
+    const d = await db.getDb();
+    const spy = jest.spyOn(d, 'getAllAsync');
+    const keys = Array.from({ length: 1234 }, (_, i) => `ghost_${i}.m4a`);
+
+    await db.filterLiveKeys('recording', keys);
+
+    const sentParams = spy.mock.calls.map(([, params]) => (Array.isArray(params) ? params : []));
+    const sizes = sentParams.map((p) => p.length);
+    expect(sizes.length).toBeGreaterThanOrEqual(4); // 1234 chaves → 4 consultas
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(401); // 400 chaves + o `kind`
+    // Nenhuma chave some nem se repete entre os pedaços (o último parâmetro é o `kind`).
+    const sent = sentParams.flatMap((p) => p.slice(0, -1));
+    expect(sent).toEqual(keys);
+    spy.mockRestore();
   });
 });
 
