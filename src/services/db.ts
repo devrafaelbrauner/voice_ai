@@ -156,14 +156,157 @@ async function runMigrations(db: SQLite.SQLiteDatabase) {
     [9, [collectRecordingEncryptions, collectTemplateEncryptions]],
   ];
   let changed = 0;
+  let encryptionOk = true;
   for (const [version, collectors] of steps) {
     if (currentVersion >= version) continue;
     const n = await runEncryptionMigration(db, version, collectors);
-    if (n === null) break;
+    if (n === null) {
+      encryptionOk = false;
+      break;
+    }
     changed += n;
+  }
+  // v10: tombstones de exclusão. Só avança user_version se as migrações de cifra
+  // concluíram (a versão é sequencial). Se elas falharam, o esquema idempotente
+  // é criado mesmo assim: exclusões feitas nesta sessão não podem se perder.
+  if (encryptionOk && currentVersion < 10) {
+    await db.withTransactionAsync(async () => {
+      await db.execAsync(TOMBSTONE_SCHEMA_SQL);
+      await db.execAsync('PRAGMA user_version = 10');
+    });
+    logDebug('DB', 'Tabela pending_deletions + triggers de tombstone criados (v10)');
+  } else {
+    await db.execAsync(TOMBSTONE_SCHEMA_SQL);
   }
   // Só nesta execução em que linhas realmente mudaram: remove o texto puro residual.
   if (changed > 0) await scrubFreedPlaintext(db);
+}
+
+// ─── Tombstones de exclusão (v10) ────────────────────────────────────────────
+//
+// Cada DELETE em recordings/custom_templates grava um tombstone em pending_deletions
+// (trigger AFTER DELETE). O sync envia a exclusão ao Supabase ANTES do pull e só
+// apaga o tombstone depois de confirmar que o remoto não tem mais o item.
+// NÃO existe trigger AFTER INSERT que apague tombstone (apagaria às cegas um tombstone
+// recém-criado — SC-01): re-criação legítima limpa o tombstone explicitamente no código
+// (setField, restore de backup). INSERT OR REPLACE não dispara triggers de DELETE
+// (recursive_triggers é OFF por padrão), então o pull não gera tombstones.
+const TOMBSTONE_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS pending_deletions (
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    deletedAt TEXT NOT NULL,
+    PRIMARY KEY (kind, key)
+  );
+  CREATE TRIGGER IF NOT EXISTS recordings_tombstone_ad
+  AFTER DELETE ON recordings
+  BEGIN
+    INSERT OR REPLACE INTO pending_deletions (kind, key, deletedAt)
+    VALUES ('recording', OLD.fileName, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  END;
+  CREATE TRIGGER IF NOT EXISTS custom_templates_tombstone_ad
+  AFTER DELETE ON custom_templates
+  BEGIN
+    INSERT OR REPLACE INTO pending_deletions (kind, key, deletedAt)
+    VALUES ('template', OLD.id, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  END;
+`;
+
+export type TombstoneKind = 'recording' | 'template';
+
+export interface PendingDeletion {
+  kind: TombstoneKind;
+  key: string;
+  deletedAt: string;
+}
+
+export async function getPendingDeletions(): Promise<PendingDeletion[]> {
+  const db = await getDb();
+  return db.getAllAsync<PendingDeletion>(
+    'SELECT kind, key, deletedAt FROM pending_deletions ORDER BY deletedAt'
+  );
+}
+
+/**
+ * Remove tombstones já confirmados no remoto. Casa também deletedAt: se o item foi
+ * re-excluído depois (tombstone mais novo), o novo tombstone sobrevive.
+ */
+export async function confirmPendingDeletions(items: PendingDeletion[]): Promise<void> {
+  if (items.length === 0) return;
+  const db = await getDb();
+  await db.withTransactionAsync(async () => {
+    for (const it of items) {
+      await db.runAsync(
+        'DELETE FROM pending_deletions WHERE kind = ? AND key = ? AND deletedAt = ?',
+        [it.kind, it.key, it.deletedAt]
+      );
+    }
+  });
+}
+
+/** Descarta todos os tombstones (troca de conta: eles pertenciam ao remoto da conta anterior). */
+export async function clearAllPendingDeletions(): Promise<void> {
+  const db = await getDb();
+  await db.runAsync('DELETE FROM pending_deletions');
+}
+
+/**
+ * Dos `keys` informados, devolve os que AINDA existem localmente e NÃO têm tombstone.
+ * Usado imediatamente antes de um upsert remoto: um sync que passou do watchdog (ou
+ * que leu o snapshot antes de uma exclusão) não pode ressuscitar o item.
+ */
+export async function filterLiveKeys(kind: TombstoneKind, keys: string[]): Promise<Set<string>> {
+  const db = await getDb();
+  const table = kind === 'recording' ? 'recordings' : 'custom_templates';
+  const col = kind === 'recording' ? 'fileName' : 'id';
+  const live = new Set<string>();
+  for (let i = 0; i < keys.length; i += 400) {
+    const chunk = keys.slice(i, i + 400);
+    const ph = chunk.map(() => '?').join(',');
+    const rows = await db.getAllAsync<{ k: string }>(
+      `SELECT ${col} AS k FROM ${table}
+        WHERE ${col} IN (${ph})
+          AND NOT EXISTS (SELECT 1 FROM pending_deletions p WHERE p.kind = ? AND p.key = ${table}.${col})`,
+      [...chunk, kind]
+    );
+    for (const r of rows) live.add(r.k);
+  }
+  return live;
+}
+
+/** Contagens para o resumo de backup — SQL puro, sem decifrar nada. */
+export interface BackupCounts {
+  recordings: number;
+  transcribed: number;
+  finalized: number;
+  templates: number;
+}
+
+export async function getBackupCounts(): Promise<BackupCounts> {
+  const db = await getDb();
+  const r = await db.getFirstAsync<{
+    total: number;
+    transcribed: number;
+    finalized: number;
+  }>(
+    `SELECT COUNT(*) AS total,
+            COALESCE(SUM(CASE WHEN transcript IS NOT NULL AND transcript <> '' THEN 1 ELSE 0 END), 0) AS transcribed,
+            COALESCE(SUM(CASE WHEN transcript IS NOT NULL AND transcript <> ''
+                               AND summary IS NOT NULL AND summary <> '' THEN 1 ELSE 0 END), 0) AS finalized
+       FROM recordings`
+  );
+  const t = await db.getFirstAsync<{ n: number }>('SELECT COUNT(*) AS n FROM custom_templates');
+  return {
+    recordings: r?.total ?? 0,
+    transcribed: r?.transcribed ?? 0,
+    finalized: r?.finalized ?? 0,
+    templates: t?.n ?? 0,
+  };
+}
+
+/** Para o restore de backup disparar o auto-sync. */
+export function notifyDataChanged() {
+  notifyChange();
 }
 
 // ─── Migrações de criptografia (v7/v8/v9) ────────────────────────────────────
@@ -519,6 +662,12 @@ export async function setField(
     `INSERT INTO recordings (fileName, ${field}, updatedAt) VALUES (?, ?, ?)
      ON CONFLICT(fileName) DO UPDATE SET ${field} = excluded.${field}, updatedAt = excluded.updatedAt`,
     [fileName, valueToStore, now]
+  );
+  // Re-criação legítima: limpa o tombstone ANTERIOR a esta escrita. `deletedAt <= now`
+  // preserva um tombstone de exclusão feita depois dela (corrida delete/setField).
+  await db.runAsync(
+    `DELETE FROM pending_deletions WHERE kind = 'recording' AND key = ? AND deletedAt <= ?`,
+    [fileName, now]
   );
   notifyChange();
 }

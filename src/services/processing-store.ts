@@ -25,14 +25,22 @@
  */
 
 import { create } from 'zustand';
-import { Alert } from 'react-native';
+import { Alert, AppState } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
-import { transcribeAudio, summarizeText, summarizeTextStream } from './openai';
+import {
+  transcribeAudio,
+  summarizeText,
+  summarizeTextStream,
+  isTranscriptionError,
+  TranscriptionError,
+  type TranscriptionErrorKind,
+} from './openai';
 import { setField, extractPatientName } from './db';
 import {
   enqueueTranscription,
   dequeueTranscription,
-  isNetworkError,
+  isRetryableTranscriptionError,
+  processQueue,
 } from './transcription-queue';
 import { logError, logWarn } from './log';
 
@@ -51,6 +59,40 @@ export interface ProcessingItem {
   createdAt: string;
 }
 
+/** Última falha de transcrição de uma gravação (por fileName), para a UI. */
+export interface TranscriptionFailure {
+  /** 'unknown' = erro que não é TranscriptionError (ex.: falha ao gravar no banco). */
+  kind: TranscriptionErrorKind | 'unknown';
+  message: string;
+  /** True quando a gravação ficou na fila offline para nova tentativa automática. */
+  queued: boolean;
+}
+
+/** Intervalo mínimo entre drenagens automáticas da fila (anti re-drain, C3-05). */
+const MIN_DRAIN_INTERVAL_MS = 5_000;
+
+let lastDrainAt = 0;
+
+/**
+ * Grava a transcrição, tira o item da fila e apaga o áudio bruto.
+ * Bug #8: o .m4a (PHI) não deve permanecer em disco sem proteção depois que o
+ * texto está cifrado no SQLite. Só roda após sucesso confirmado — em qualquer
+ * falha o áudio permanece.
+ */
+async function saveTranscriptAndCleanup(fileName: string, uri: string, text: string): Promise<void> {
+  await setField(fileName, 'transcript', text);
+  await dequeueTranscription(fileName);
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    if (info.exists) {
+      await FileSystem.deleteAsync(uri, { idempotent: true });
+    }
+  } catch (deleteErr) {
+    // Falha silenciosa: não bloquear o fluxo por erro de limpeza
+    logWarn('processing-store.deleteAudio', deleteErr);
+  }
+}
+
 interface ProcessingState {
   /** FileNames de gravações sendo transcritas no momento. */
   transcribingFiles: ReadonlySet<string>;
@@ -67,11 +109,19 @@ interface ProcessingState {
    * Componentes assistem a este valor para saber quando recarregar a lista.
    */
   completionCount: number;
+  /** Última falha de transcrição por fileName. Limpa ao reiniciar ou ao concluir. */
+  transcriptionErrors: Readonly<Record<string, TranscriptionFailure>>;
 
   /** Inicia transcrição em background. Idempotente: ignora se já em andamento. */
   startTranscription: (item: TranscriptionItem) => void;
   /** Inicia processamento IA em background. Idempotente: ignora se já em andamento. */
   startProcessing: (item: ProcessingItem, templateId: string) => void;
+  /**
+   * Drena a fila offline (itens por fileName, respeitando cooldown). Não
+   * reentrante e com intervalo mínimo; nunca lança. Chamada automática quando
+   * o app volta ao primeiro plano (AppState 'active').
+   */
+  drainOfflineQueue: () => Promise<void>;
 
   /** Helper para verificar estado sem re-renderizar toda vez. */
   isTranscribing: (fileName: string) => boolean;
@@ -85,6 +135,7 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
   processingFiles: new Set<string>(),
   streamingContent: {},
   completionCount: 0,
+  transcriptionErrors: {},
 
   isTranscribing: (fileName) => get().transcribingFiles.has(fileName),
   isProcessing:   (fileName) => get().processingFiles.has(fileName),
@@ -101,9 +152,13 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
     }
     if (get().transcribingFiles.has(item.fileName)) return; // já em andamento
 
-    set((s) => ({
-      transcribingFiles: new Set([...s.transcribingFiles, item.fileName]),
-    }));
+    set((s) => {
+      const { [item.fileName]: _cleared, ...restErrors } = s.transcriptionErrors;
+      return {
+        transcribingFiles: new Set([...s.transcribingFiles, item.fileName]),
+        transcriptionErrors: restErrors,
+      };
+    });
 
     // Fire-and-forget — roda independente do componente que disparou
     void (async () => {
@@ -119,33 +174,42 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
           return;
         }
 
-        await setField(item.fileName, 'transcript', text);
-        await dequeueTranscription(item.fileName);
-
-        // Bug #8: deletar áudio PHI após transcrição bem-sucedida.
-        // O texto já está cifrado no SQLite — o .m4a bruto não é mais necessário
-        // e não deve permanecer em disco sem proteção.
-        try {
-          const info = await FileSystem.getInfoAsync(item.uri);
-          if (info.exists) {
-            await FileSystem.deleteAsync(item.uri, { idempotent: true });
-          }
-        } catch (deleteErr) {
-          // Falha silenciosa: não bloquear o fluxo por erro de limpeza
-          logWarn('processing-store.deleteAudio', deleteErr);
-        }
+        await saveTranscriptAndCleanup(item.fileName, item.uri, text);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (isNetworkError(err)) {
-          await enqueueTranscription({
-            fileName: item.fileName,
-            uri: item.uri,
-            createdAt: item.createdAt,
-            lastError: msg,
-          }).catch(() => {});
+        let queued = false;
+        if (isRetryableTranscriptionError(err)) {
+          try {
+            await enqueueTranscription({
+              fileName: item.fileName,
+              uri: item.uri,
+              createdAt: item.createdAt,
+              error: err,
+            });
+            queued = true;
+          } catch (queueErr) {
+            logWarn('processing-store.enqueue', queueErr);
+          }
+        }
+        set((s) => ({
+          transcriptionErrors: {
+            ...s.transcriptionErrors,
+            [item.fileName]: {
+              kind: isTranscriptionError(err) ? err.kind : 'unknown',
+              message: msg,
+              queued,
+            },
+          },
+        }));
+        if (queued && isTranscriptionError(err) && err.kind === 'network') {
           Alert.alert(
             'Sem conexão',
             'Sua gravação foi salva na fila offline. Vamos tentar transcrever automaticamente quando a conexão voltar.'
+          );
+        } else if (queued) {
+          Alert.alert(
+            'Transcrição adiada',
+            `${msg}\n\nSua gravação foi salva na fila e será tentada novamente automaticamente.`
           );
         } else {
           logError('processing-store.transcribe', err);
@@ -160,6 +224,66 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
         }));
       }
     })();
+  },
+
+  // ── Fila offline ────────────────────────────────────────────────────────────
+
+  async drainOfflineQueue() {
+    const now = Date.now();
+    if (now - lastDrainAt < MIN_DRAIN_INTERVAL_MS) return;
+    lastDrainAt = now;
+    try {
+      // Falha na fila: reflete na UI por fileName (inclui invalid_key/forbidden,
+      // que são de configuração e não gastam tentativa do item).
+      const recordFailure = (fileName: string, err: unknown) =>
+        set((s) => ({
+          transcriptionErrors: {
+            ...s.transcriptionErrors,
+            [fileName]: {
+              kind: isTranscriptionError(err) ? err.kind : 'unknown',
+              message: err instanceof Error ? err.message : String(err),
+              queued: true,
+            },
+          },
+        }));
+      const summary = await processQueue(
+        async (uri, queued) => {
+          // Marca a gravação como "transcrevendo" enquanto a fila trabalha nela.
+          set((s) => ({ transcribingFiles: new Set([...s.transcribingFiles, queued.fileName]) }));
+          try {
+            return { text: await transcribeAudio(uri) };
+          } catch (err) {
+            recordFailure(queued.fileName, err);
+            throw err;
+          } finally {
+            set((s) => ({
+              transcribingFiles: new Set([...s.transcribingFiles].filter((f) => f !== queued.fileName)),
+            }));
+          }
+        },
+        async (queued, text) => {
+          if (!text || text.trim().length === 0) {
+            const empty = new TranscriptionError('bad_response', 'O áudio não contém fala reconhecível.', {
+              code: 'vazio',
+            });
+            recordFailure(queued.fileName, empty);
+            throw empty;
+          }
+          await saveTranscriptAndCleanup(queued.fileName, queued.uri, text);
+          set((s) => {
+            const { [queued.fileName]: _cleared, ...restErrors } = s.transcriptionErrors;
+            return { transcriptionErrors: restErrors };
+          });
+        },
+        // Gravação que o usuário está transcrevendo à mão não entra na fila agora.
+        { skip: (queued) => get().transcribingFiles.has(queued.fileName) }
+      );
+      if (summary.processed > 0 || summary.failed > 0 || summary.permanentlyFailed > 0) {
+        set((s) => ({ completionCount: s.completionCount + 1 }));
+      }
+    } catch (err) {
+      logWarn('processing-store.drain', err);
+    }
   },
 
   // ── Processamento IA (streaming) ────────────────────────────────────────────
@@ -226,3 +350,11 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
     })();
   },
 }));
+
+// Drena a fila offline quando o app volta ao primeiro plano. Registrado uma
+// vez (nível de módulo, fora de qualquer componente): a fila não depende da
+// tela estar focada, e drainOfflineQueue é não reentrante e tem intervalo
+// mínimo, então eventos 'active' repetidos não geram laço de re-drain.
+AppState.addEventListener('change', (state) => {
+  if (state === 'active') void useProcessingStore.getState().drainOfflineQueue();
+});

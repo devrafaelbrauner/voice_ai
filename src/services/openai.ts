@@ -8,11 +8,8 @@ import {
   calculateWhisperCost,
   calculateChatCost,
 } from './api_usage';
-import {
-  transcribeViaProxy,
-  chatViaProxy,
-  isProxyAvailable,
-} from './openai-proxy';
+import { isProxyAvailable, chatViaProxy } from './openai-proxy';
+import { supabase } from './supabase';
 import { logWarn } from './log';
 import { secureFetch } from './secure-fetch';
 import {
@@ -230,7 +227,9 @@ export async function clearApiKey(): Promise<void> {
 }
 
 const DIRECT_CHAT_TIMEOUT_MS = 60_000;        // 1 min
-const DIRECT_TRANSCRIBE_TIMEOUT_MS = 120_000; // 2 min
+// Teto do passo quando a duração do áudio é desconhecida, e para áudios longos
+// (> LONG_AUDIO_SECONDS): sem chunking, o upload sozinho já passa dos 45 s.
+const STEP_TIMEOUT_CEILING_UNKNOWN_MS = 120_000; // 2 min (valor fixo anterior)
 const MIN_TRANSCRIBE_AUDIO_BYTES = 1600;      // ~0.1s at 128 kbps
 
 // expoFetch + timeout — necessário para uploads multipart (File nativo do Expo).
@@ -254,6 +253,362 @@ async function expoFetchWithTimeout(
   }
 }
 
+// ══ Motor de transcrição ═════════════════════════════════════════════════════
+//
+// Porte enxuto do motor do FlowVoice (Kotlin):
+//   - TranscriptionErrorClassifier → TranscriptionError + classifyHttpError
+//   - RetryingTranscriptionClient  → withRetry (backoff exponencial + jitter)
+//   - TranscriberChain/SanityCheck → transcribeWithChain + checkTranscriptSanity
+// Chaves nunca entram em mensagens, logs ou no corpo dos erros.
+
+export type TranscriptionErrorKind =
+  | 'invalid_key'
+  | 'forbidden'
+  | 'timeout'
+  | 'rate_limit'
+  | 'server'
+  | 'network'
+  | 'bad_response'
+  | 'cancelled';
+
+const DEFAULT_TRANSIENT: Record<TranscriptionErrorKind, boolean> = {
+  invalid_key: false,
+  forbidden: false,
+  timeout: true,
+  rate_limit: true,
+  server: true,
+  network: true,
+  bad_response: false,
+  cancelled: false,
+};
+
+/** Códigos de `bad_response` que vêm da checagem de sanidade (recuam na cadeia). */
+export type TranscriptSanityCode = 'vazio' | 'eco' | 'repeticao';
+
+export class TranscriptionError extends Error {
+  readonly kind: TranscriptionErrorKind;
+  readonly status?: number;
+  /** Espera mínima pedida pelo servidor (Retry-After), em ms. */
+  readonly retryAfterMs?: number;
+  /** Vale tentar de novo mais tarde sem mudar nada (rede, 5xx, 429, timeout). */
+  readonly transient: boolean;
+  /** Detalhe estável: 'no_credential', 'audio_too_short', 'invalid_json', 'vazio', 'eco', 'repeticao'… */
+  readonly code?: string;
+
+  constructor(
+    kind: TranscriptionErrorKind,
+    message: string,
+    init: { status?: number; retryAfterMs?: number; transient?: boolean; code?: string } = {}
+  ) {
+    super(message);
+    // Hermes/Babel: garante instanceof mesmo com a classe transpilada.
+    Object.setPrototypeOf(this, TranscriptionError.prototype);
+    this.name = 'TranscriptionError';
+    this.kind = kind;
+    this.status = init.status;
+    this.retryAfterMs = init.retryAfterMs;
+    this.transient = init.transient ?? DEFAULT_TRANSIENT[kind];
+    this.code = init.code;
+  }
+}
+
+export function isTranscriptionError(err: unknown): err is TranscriptionError {
+  return (
+    err instanceof TranscriptionError ||
+    (err instanceof Error && err.name === 'TranscriptionError' && 'kind' in err && 'transient' in err)
+  );
+}
+
+const KIND_MESSAGES: Record<TranscriptionErrorKind, string> = {
+  invalid_key: 'Credencial de transcrição inválida ou expirada. Verifique em Configurações.',
+  forbidden: 'Acesso negado pelo serviço de transcrição. Verifique permissões e limites da chave.',
+  timeout: 'Tempo esgotado ao transcrever. Verifique sua conexão e tente novamente.',
+  rate_limit: 'Limite de requisições do serviço de transcrição atingido. Tente novamente em instantes.',
+  server: 'Serviço de transcrição indisponível no momento.',
+  network: 'Sem conexão com o serviço de transcrição.',
+  bad_response: 'Resposta inválida do serviço de transcrição.',
+  cancelled: 'Transcrição cancelada.',
+};
+
+const MAX_RETRY_AFTER_MS = 3_600_000; // 1 h
+
+/** Retry-After em segundos inteiros ou data HTTP → ms (nunca negativo). */
+export function parseRetryAfter(value: string | null | undefined, now = Date.now()): number | undefined {
+  if (!value) return undefined;
+  const v = value.trim();
+  if (/^\d+$/.test(v)) return Math.min(Number(v) * 1000, MAX_RETRY_AFTER_MS);
+  const at = Date.parse(v);
+  if (Number.isNaN(at)) return undefined;
+  return Math.min(Math.max(0, at - now), MAX_RETRY_AFTER_MS);
+}
+
+// Mensagem do provedor só para diagnóstico: some se puder conter credencial.
+function sanitizeProviderMessage(message: unknown): string | undefined {
+  if (typeof message !== 'string') return undefined;
+  const compact = message.replace(/\s+/g, ' ').trim();
+  if (!compact || /sk-|bearer/i.test(compact)) return undefined;
+  return compact.slice(0, 80);
+}
+
+function parseProviderError(body: string): { code?: string; message?: string } {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) {
+      const e = parsed.error;
+      if (typeof e === 'object' && e !== null) {
+        return {
+          code: 'code' in e && typeof e.code === 'string' ? e.code : undefined,
+          message: 'message' in e ? sanitizeProviderMessage(e.message) : undefined,
+        };
+      }
+    }
+  } catch {
+    // corpo não-JSON: sem detalhe
+  }
+  return {};
+}
+
+/** Classifica uma resposta HTTP não-2xx por status (nunca por texto da mensagem). */
+export function classifyHttpError(
+  status: number,
+  retryAfterHeader?: string | null,
+  body = ''
+): TranscriptionError {
+  const provider = parseProviderError(body);
+  if (status === 401) {
+    return new TranscriptionError('invalid_key', KIND_MESSAGES.invalid_key, { status });
+  }
+  if (status === 403) {
+    return new TranscriptionError('forbidden', KIND_MESSAGES.forbidden, { status });
+  }
+  if (status === 408) {
+    return new TranscriptionError('timeout', KIND_MESSAGES.timeout, { status });
+  }
+  if (status === 429) {
+    return new TranscriptionError('rate_limit', KIND_MESSAGES.rate_limit, {
+      status,
+      retryAfterMs: parseRetryAfter(retryAfterHeader),
+      // Cota esgotada não se resolve esperando alguns segundos.
+      transient: provider.code !== 'insufficient_quota',
+      code: provider.code,
+    });
+  }
+  if (status >= 500 && status <= 599) {
+    return new TranscriptionError('server', `${KIND_MESSAGES.server} (HTTP ${status})`, {
+      status,
+      retryAfterMs: parseRetryAfter(retryAfterHeader),
+    });
+  }
+  if (isAudioTooShortError(body)) {
+    return new TranscriptionError(
+      'bad_response',
+      'Gravação muito curta para transcrever. Grave pelo menos 1 segundo de áudio e tente novamente.',
+      { status, code: 'audio_too_short' }
+    );
+  }
+  const detail = provider.message ? `: ${provider.message}` : '';
+  return new TranscriptionError('bad_response', `Pedido recusado (HTTP ${status})${detail}`, {
+    status,
+    code: provider.code ?? `http_${status}`,
+  });
+}
+
+/** Classifica uma exceção de fetch/leitura: abort próprio = timeout, abort do chamador = cancelled. */
+function classifyThrown(
+  err: unknown,
+  ctx: { timedOut: boolean; callerAborted: boolean }
+): TranscriptionError {
+  if (isTranscriptionError(err)) return err;
+  if (ctx.callerAborted) return new TranscriptionError('cancelled', KIND_MESSAGES.cancelled);
+  const aborted =
+    typeof err === 'object' && err !== null && 'name' in err && err.name === 'AbortError';
+  if (ctx.timedOut || aborted) return new TranscriptionError('timeout', KIND_MESSAGES.timeout);
+  return new TranscriptionError('network', KIND_MESSAGES.network);
+}
+
+// ── Backoff ──────────────────────────────────────────────────────────────────
+
+const MAX_RETRIES = 3;
+const INITIAL_BACKOFF_MS = 500;
+const MAX_BACKOFF_MS = 8_000;
+
+/** 500 ms → 8 s exponencial; metade fixa + metade com jitter (mesma fórmula do FlowVoice). */
+export function backoffDelayMs(attempt: number, random: number): number {
+  const exp = Math.min(INITIAL_BACKOFF_MS * 2 ** Math.min(Math.max(attempt, 0), 16), MAX_BACKOFF_MS);
+  const jitter = exp * Math.min(Math.max(random, 0), 1);
+  return Math.floor(exp / 2 + jitter / 2);
+}
+
+/** Relógio/sono/aleatório injetáveis (testes). Não use em código de app. */
+export const engineEnv = {
+  now: () => Date.now(),
+  random: () => Math.random(),
+  // Promise.withResolvers não existe no Hermes: executor clássico.
+  sleep: (ms: number, signal?: AbortSignal) =>
+    new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new TranscriptionError('cancelled', KIND_MESSAGES.cancelled));
+        return;
+      }
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new TranscriptionError('cancelled', KIND_MESSAGES.cancelled));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    }),
+};
+
+function throwIfCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new TranscriptionError('cancelled', KIND_MESSAGES.cancelled);
+}
+
+/**
+ * Repete só erros transitórios, até MAX_RETRIES vezes, dentro do orçamento
+ * (`deadline`) do passo. Respeita Retry-After; se a espera não cabe no
+ * orçamento, devolve o erro (que carrega retryAfterMs para a fila).
+ */
+async function withRetry<T>(
+  run: (timeoutMs: number) => Promise<T>,
+  deadline: number,
+  signal?: AbortSignal
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    throwIfCancelled(signal);
+    const remaining = deadline - engineEnv.now();
+    if (remaining <= 0) throw new TranscriptionError('timeout', KIND_MESSAGES.timeout);
+    try {
+      return await run(remaining);
+    } catch (e) {
+      const err = classifyThrown(e, { timedOut: false, callerAborted: !!signal?.aborted });
+      if (!err.transient || attempt >= MAX_RETRIES) throw err;
+      const delay = err.retryAfterMs ?? backoffDelayMs(attempt, engineEnv.random());
+      if (delay >= deadline - engineEnv.now()) throw err;
+      await engineEnv.sleep(delay, signal);
+    }
+  }
+}
+
+// ── Sanidade do texto ────────────────────────────────────────────────────────
+
+function wordsOf(text: string): string[] {
+  return text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+
+let promptWordsCache: string[] | null = null;
+function promptWords(): string[] {
+  return (promptWordsCache ??= wordsOf(WHISPER_MEDICAL_PROMPT));
+}
+
+const MIN_PROMPT_COPY_WORDS = 8;
+
+// Maior sequência contígua de palavras em comum com o prompt cobre ≥ 90 % do texto.
+function copiesPrompt(words: string[]): boolean {
+  if (words.length < MIN_PROMPT_COPY_WORDS) return false;
+  const source = promptWords();
+  if (10 * source.length < 9 * words.length) return false; // texto maior que o prompt não é eco dele
+  let previous = new Int32Array(source.length + 1);
+  let current = new Int32Array(source.length + 1);
+  let longest = 0;
+  for (const word of words) {
+    for (let i = 0; i < source.length; i++) {
+      const run = word === source[i] ? previous[i] + 1 : 0;
+      current[i + 1] = run;
+      if (run > longest) longest = run;
+    }
+    [previous, current] = [current, previous];
+  }
+  return 10 * longest >= 9 * words.length;
+}
+
+const MIN_LOOP_REPEATS = 4;
+const MIN_LOOP_WORDS = 12;
+const MAX_LOOP_NGRAM = 8;
+
+// Laço de alucinação: um bloco de 1–8 palavras repetido ≥ 4 vezes seguidas que
+// cobre ≥ 50 % do texto (e ≥ 12 palavras).
+function isRepetitive(words: string[]): boolean {
+  if (words.length < MIN_LOOP_WORDS) return false;
+  for (let n = 1; n <= MAX_LOOP_NGRAM; n++) {
+    let covered = 0;
+    let i = 0;
+    while (i + n <= words.length) {
+      let repeats = 1;
+      while (i + (repeats + 1) * n <= words.length) {
+        let same = true;
+        for (let k = 0; k < n; k++) {
+          if (words[i + k] !== words[i + repeats * n + k]) {
+            same = false;
+            break;
+          }
+        }
+        if (!same) break;
+        repeats++;
+      }
+      if (repeats >= MIN_LOOP_REPEATS) {
+        covered += repeats * n;
+        i += repeats * n;
+      } else {
+        i++;
+      }
+    }
+    if (covered >= MIN_LOOP_WORDS && 2 * covered >= words.length) return true;
+  }
+  return false;
+}
+
+/** null = texto aceito; senão o código da recusa. Ordem: vazio → eco do prompt → repetição. */
+export function checkTranscriptSanity(text: string): TranscriptSanityCode | null {
+  const words = wordsOf(text);
+  if (words.length === 0) return 'vazio';
+  if (copiesPrompt(words)) return 'eco';
+  if (isRepetitive(words)) return 'repeticao';
+  return null;
+}
+
+// ── Passos da cadeia ─────────────────────────────────────────────────────────
+
+/** `code` de credencial ausente (erro de configuração, sem recuo). */
+const NO_CREDENTIAL = 'no_credential';
+const FALLBACK_CHAIN: readonly TranscriptionModelId[] = [
+  'openai/gpt-4o-mini-transcribe',
+  'whisper-1',
+];
+
+// Provedor/rota de um modelo: 'whisper-1' = OpenAI (proxy ou direto); os demais = OpenRouter.
+function providerOf(model: TranscriptionModelId): ModelProvider {
+  return model === 'whisper-1' ? 'openai' : 'openrouter';
+}
+
+/**
+ * Escolhido → gpt-4o-mini-transcribe → whisper-1, sem repetir, mas NUNCA muda
+ * de provedor: dado clínico não vai a outro provedor sem opt-in. Sem
+ * alternativa no mesmo provedor, a cadeia é só o modelo escolhido.
+ */
+export function transcriptionChainFor(chosen: TranscriptionModelId): TranscriptionModelId[] {
+  const provider = providerOf(chosen);
+  return [chosen, ...FALLBACK_CHAIN.filter((m) => m !== chosen && providerOf(m) === provider)];
+}
+
+const STEP_BASE_TIMEOUT_MS = 8_000;
+const STEP_MAX_TIMEOUT_MS = 45_000;
+const STEP_PER_AUDIO_SECOND_MS = 400; // 0,4 × duração
+/** O teto de 45 s do FlowVoice vale para pedaços ≤ 120 s; aqui não há chunking. */
+const LONG_AUDIO_SECONDS = 120;
+
+/** min(45 s, 8 s + 0,4 × duração). Duração desconhecida ou > 120 s: teto de 120 s. */
+export function stepTimeoutMs(estimatedSeconds?: number): number {
+  if (estimatedSeconds === undefined || !(estimatedSeconds > 0)) {
+    return STEP_TIMEOUT_CEILING_UNKNOWN_MS;
+  }
+  const ceiling =
+    estimatedSeconds > LONG_AUDIO_SECONDS ? STEP_TIMEOUT_CEILING_UNKNOWN_MS : STEP_MAX_TIMEOUT_MS;
+  return Math.min(ceiling, STEP_BASE_TIMEOUT_MS + estimatedSeconds * STEP_PER_AUDIO_SECOND_MS);
+}
+
 function createTranscriptionFormData(uri: string, model = 'whisper-1'): FormData {
   const file = new File(uri);
   const formData = new FormData();
@@ -265,57 +620,226 @@ function createTranscriptionFormData(uri: string, model = 'whisper-1'): FormData
   return formData;
 }
 
-/**
- * Transcreve áudio via OpenRouter usando modelos de speech-to-text
- * (GPT-4o Transcribe, Whisper Large V3, MAI-Transcribe, etc.).
- * A API do OpenRouter é compatível com o formato multipart do Whisper.
- */
-async function transcribeViaOpenRouter(
-  uri: string,
-  model: TranscriptionModelId
-): Promise<string> {
-  const orKey = await getOpenRouterApiKey();
-  if (!orKey) {
-    throw new Error(
-      'Chave OpenRouter não configurada. Acesse Configurações → API Keys e insira sua chave OpenRouter.'
-    );
-  }
+interface StepContext {
+  uri: string;
+  audioBytes: number;
+  mode: OpenAIMode;
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
 
-  const response = await expoFetchWithTimeout(
-    'https://openrouter.ai/api/v1/audio/transcriptions',
-    {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${orKey}` },
-      body: createTranscriptionFormData(uri, model),
-    },
-    DIRECT_TRANSCRIBE_TIMEOUT_MS
-  );
-
-  const body = await response.text();
-  if (!response.ok) {
-    if (isAudioTooShortError(body)) {
-      throw new Error(
-        'Gravação muito curta para transcrever. Grave pelo menos 1 segundo de áudio.'
-      );
-    }
-    throw new Error(`OpenRouter Transcription ${response.status}: ${body.slice(0, 200)}`);
-  }
-
-  const json = JSON.parse(body);
-
+/** Um POST multipart com timeout próprio (inclui a leitura do corpo). Sempre lança TranscriptionError. */
+async function postTranscription(
+  url: string,
+  headers: Record<string, string>,
+  buildForm: () => FormData,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<Record<string, unknown>> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted) controller.abort();
   try {
-    const audioSeconds = await estimateAudioSeconds(uri);
-    await logApiUsage({
-      operation: 'whisper',
-      model,
-      audioSeconds,
-      costUSD: 0, // OpenRouter varia por modelo; logamos 0 como placeholder
+    const response = await expoFetch(url, {
+      method: 'POST',
+      headers,
+      body: buildForm(),
+      signal: controller.signal,
     });
+    const body = await response.text();
+    if (!response.ok) {
+      throw classifyHttpError(response.status, response.headers?.get('retry-after'), body);
+    }
+    let json: unknown;
+    try {
+      json = JSON.parse(body);
+    } catch {
+      json = null;
+    }
+    if (typeof json !== 'object' || json === null) {
+      throw new TranscriptionError('bad_response', KIND_MESSAGES.bad_response, { code: 'invalid_json' });
+    }
+    return json as Record<string, unknown>;
+  } catch (err) {
+    throw classifyThrown(err, { timedOut, callerAborted: !!signal?.aborted });
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+async function logWhisperUsage(model: string, audioSeconds: number, costUSD: number): Promise<void> {
+  try {
+    await logApiUsage({ operation: 'whisper', model, audioSeconds, costUSD });
   } catch (e) {
     logWarn('api_usage', e);
   }
+}
 
+function noCredential(message: string): TranscriptionError {
+  return new TranscriptionError('invalid_key', message, { code: NO_CREDENTIAL });
+}
+
+async function stepOpenRouter(model: TranscriptionModelId, ctx: StepContext): Promise<string> {
+  const orKey = await getOpenRouterApiKey();
+  if (!orKey) {
+    throw noCredential(
+      'Chave OpenRouter não configurada. Acesse Configurações → API Keys e insira sua chave OpenRouter.'
+    );
+  }
+  const deadline = engineEnv.now() + ctx.timeoutMs;
+  const json = await withRetry(
+    (t) =>
+      postTranscription(
+        'https://openrouter.ai/api/v1/audio/transcriptions',
+        { Authorization: `Bearer ${orKey}` },
+        () => createTranscriptionFormData(ctx.uri, model),
+        t,
+        ctx.signal
+      ),
+    deadline,
+    ctx.signal
+  );
+  // OpenRouter varia por modelo; logamos custo 0 como placeholder.
+  await logWhisperUsage(model, await estimateAudioSeconds(ctx.uri), 0);
   return typeof json.text === 'string' ? json.text : '';
+}
+
+async function stepProxy(ctx: StepContext): Promise<string> {
+  const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  if (!token || !supabaseUrl) {
+    throw noCredential('Sessão Supabase necessária para usar o proxy.');
+  }
+  const deadline = engineEnv.now() + ctx.timeoutMs;
+  const json = await withRetry(
+    (t) =>
+      postTranscription(
+        `${supabaseUrl}/functions/v1/openai-transcribe`,
+        { Authorization: `Bearer ${token}`, 'x-audio-bytes': String(ctx.audioBytes) },
+        () => createTranscriptionFormData(ctx.uri, 'whisper-1'),
+        t,
+        ctx.signal
+      ),
+    deadline,
+    ctx.signal
+  );
+  // Registra localmente os números reportados pelo servidor.
+  const serverSeconds = typeof json.audio_seconds === 'number' ? json.audio_seconds : 0;
+  const serverCost = typeof json.cost_usd === 'number' ? json.cost_usd : 0;
+  await logWhisperUsage('whisper-1', serverSeconds || (await estimateAudioSeconds(ctx.uri)), serverCost);
+  return typeof json.text === 'string' ? json.text : '';
+}
+
+async function stepDirectOpenAI(ctx: StepContext): Promise<string> {
+  const apiKey = await getApiKey();
+  if (!apiKey) {
+    throw noCredential(
+      'Sem credencial: faça login (modo seguro) ou configure uma OpenAI API key em Configurações.'
+    );
+  }
+  const deadline = engineEnv.now() + ctx.timeoutMs;
+  const json = await withRetry(
+    (t) =>
+      postTranscription(
+        'https://api.openai.com/v1/audio/transcriptions',
+        { Authorization: `Bearer ${apiKey}` },
+        () => createTranscriptionFormData(ctx.uri),
+        t,
+        ctx.signal
+      ),
+    deadline,
+    ctx.signal
+  );
+  const audioSeconds = await estimateAudioSeconds(ctx.uri);
+  await logWhisperUsage('whisper-1', audioSeconds, calculateWhisperCost(audioSeconds));
+  return typeof json.text === 'string' ? json.text : '';
+}
+
+function runStep(model: TranscriptionModelId, ctx: StepContext): Promise<string> {
+  if (model !== 'whisper-1') return stepOpenRouter(model, ctx);
+  // Fail-closed: no modo proxy o whisper-1 só sai pelo proxy; nunca cai para chave direta.
+  return ctx.mode === 'proxy' ? stepProxy(ctx) : stepDirectOpenAI(ctx);
+}
+
+/** Recuar para o próximo modelo? Transitório persistente, timeout ou texto recusado pela sanidade. */
+function shouldFallBack(err: TranscriptionError): boolean {
+  return (
+    err.transient ||
+    err.kind === 'timeout' ||
+    (err.kind === 'bad_response' &&
+      (err.code === 'vazio' || err.code === 'eco' || err.code === 'repeticao'))
+  );
+}
+
+export interface TranscribeOptions {
+  signal?: AbortSignal;
+  /** Tamanho do arquivo em bytes (0/ausente = desconhecido → teto fixo de 120 s). */
+  audioBytes?: number;
+}
+
+/**
+ * Cadeia (ver transcriptionChainFor): escolhido → gpt-4o-mini-transcribe →
+ * whisper-1, restrita ao provedor do escolhido. Recua em falha transitória
+ * persistente (após os retries), timeout ou texto recusado. Falha permanente
+ * do escolhido (401/403/400…) é lançada na hora. Texto vazio em todos os
+ * passos que responderam devolve '' (o chamador mostra "nenhuma fala").
+ */
+export async function transcribeWithChain(
+  uri: string,
+  chosen: TranscriptionModelId,
+  options: TranscribeOptions = {}
+): Promise<string> {
+  const audioBytes = options.audioBytes ?? 0;
+  const timeoutMs = stepTimeoutMs(audioBytes > 0 ? audioBytes / 4000 : undefined);
+  const mode = await getOpenAIMode();
+  const failures: TranscriptionError[] = [];
+  let emptyAnswers = 0;
+  let otherRefusals = 0;
+
+  const chain = transcriptionChainFor(chosen);
+  for (let i = 0; i < chain.length; i++) {
+    throwIfCancelled(options.signal);
+    const model = chain[i];
+    try {
+      const text = await runStep(model, {
+        uri,
+        audioBytes,
+        mode,
+        timeoutMs,
+        signal: options.signal,
+      });
+      const refused = checkTranscriptSanity(text);
+      if (refused === null) return text;
+      if (refused === 'vazio') emptyAnswers++;
+      else otherRefusals++;
+      failures.push(
+        new TranscriptionError('bad_response', `Texto recusado pela checagem de sanidade (${refused}).`, {
+          code: refused,
+        })
+      );
+      logWarn('transcribe', `step ${model} refused: ${refused}`);
+    } catch (e) {
+      const err = classifyThrown(e, { timedOut: false, callerAborted: !!options.signal?.aborted });
+      if (err.kind === 'cancelled') throw err;
+      // (sem recuo entre provedores: todos os passos compartilham a credencial do escolhido)
+      failures.push(err);
+      logWarn('transcribe', `step ${model} failed: ${err.kind}`);
+      // O modelo escolhido falhou por motivo que outro modelo não resolve: sem recuo.
+      if (i === 0 && !shouldFallBack(err)) throw err;
+    }
+  }
+
+  if (emptyAnswers > 0 && otherRefusals === 0) return '';
+  // Transitório vence permanente: a fila deve tentar de novo mais tarde.
+  throw failures.find((f) => f.transient) ?? failures[0];
 }
 
 // Estima a duração do áudio a partir do tamanho do arquivo .m4a.
@@ -348,83 +872,22 @@ function isAudioTooShortError(text: string): boolean {
   );
 }
 
-export async function transcribeAudio(uri: string): Promise<string> {
+export async function transcribeAudio(
+  uri: string,
+  options: { signal?: AbortSignal } = {}
+): Promise<string> {
   const audioBytes = await getAudioBytes(uri);
   if (audioBytes > 0 && audioBytes < MIN_TRANSCRIBE_AUDIO_BYTES) {
-    throw new Error(
-      'Gravação muito curta para transcrever. Grave pelo menos 1 segundo de áudio e tente novamente.'
+    throw new TranscriptionError(
+      'bad_response',
+      'Gravação muito curta para transcrever. Grave pelo menos 1 segundo de áudio e tente novamente.',
+      { code: 'audio_too_short' }
     );
   }
-
-  // Se o usuário escolheu um modelo de transcrição via OpenRouter, usar esse caminho.
-  const transcriptionModel = await getTranscriptionModel();
-  if (transcriptionModel !== 'whisper-1') {
-    return transcribeViaOpenRouter(uri, transcriptionModel);
-  }
-
-  const mode = await getOpenAIMode();
-
-  if (mode === 'proxy') {
-    const result = await transcribeViaProxy(uri, audioBytes);
-    // Log usage locally with the server-reported numbers.
-    try {
-      await logApiUsage({
-        operation: 'whisper',
-        model: 'whisper-1',
-        audioSeconds: result.audioSeconds || (await estimateAudioSeconds(uri)),
-        costUSD: result.costUSD,
-      });
-    } catch (e) {
-      logWarn('api_usage', e);
-    }
-    return result.text;
-  }
-
-  // Direct mode: legacy path using client-side API key.
-  const apiKey = await getApiKey();
-  if (!apiKey) {
-    throw new Error(
-      'Sem credencial: faça login (modo seguro) ou configure uma OpenAI API key em Configurações.'
-    );
-  }
-
-  const response = await expoFetchWithTimeout(
-    'https://api.openai.com/v1/audio/transcriptions',
-    {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}` },
-      body: createTranscriptionFormData(uri),
-    },
-    DIRECT_TRANSCRIBE_TIMEOUT_MS
-  );
-
-  const body = await response.text();
-  if (!response.ok) {
-    if (isAudioTooShortError(body)) {
-      throw new Error(
-        'Gravação muito curta para transcrever. Grave pelo menos 1 segundo de áudio e tente novamente.'
-      );
-    }
-    throw new Error(`OpenAI API ${response.status}: ${body}`);
-  }
-
-  const json = JSON.parse(body);
-
-  try {
-    const audioSeconds = await estimateAudioSeconds(uri);
-    const costUSD = calculateWhisperCost(audioSeconds);
-    await logApiUsage({
-      operation: 'whisper',
-      model: 'whisper-1',
-      audioSeconds,
-      costUSD,
-    });
-  } catch (e) {
-    logWarn('api_usage', e);
-  }
-
-  // Bug #9: normalizar undefined/null para string vazia (verificado no caller)
-  return typeof json.text === 'string' ? json.text : '';
+  return transcribeWithChain(uri, await getTranscriptionModel(), {
+    signal: options.signal,
+    audioBytes,
+  });
 }
 
 export interface PromptTemplate {

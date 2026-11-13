@@ -56,7 +56,7 @@ import {
   useProcessingStore,
 } from '../services/processing-store';
 import { formatDefaultName } from '../services/recordings';
-import { openShareMenu, exportToMarkdown } from '../services/share';
+import { openShareMenu, exportToMarkdown, sweepOldExports } from '../services/share';
 import { exportRecordingToPDF, generatePdfFile, sharePdfFile } from '../services/pdf';
 import { getDoctorProfile } from '../services/doctor';
 import {
@@ -264,8 +264,12 @@ export default function RecordingsScreen() {
     setFailedCount(f);
   }, []);
 
+  // Guard por ref (não por state): com state em deps o useFocusEffect re-disparava a cada
+  // ciclo de processamento (~800 ms) enquanto a tela estava focada. O state segue só para a UI.
+  const processingQueueRef = useRef(false);
   const processOfflineQueue = useCallback(async () => {
-    if (isProcessingQueue) return;
+    if (processingQueueRef.current) return;
+    processingQueueRef.current = true;
     setIsProcessingQueue(true);
     try {
       const { processed, failed, permanentlyFailed, remaining } = await processQueue(
@@ -293,10 +297,11 @@ export default function RecordingsScreen() {
       logWarn('queue', err);
       Alert.alert('Erro na fila', 'Não foi possível processar a fila offline.');
     } finally {
+      processingQueueRef.current = false;
       setIsProcessingQueue(false);
       await refreshQueueCount();
     }
-  }, [isProcessingQueue, refreshQueueCount]);
+  }, [refreshQueueCount]);
 
   const handleClearFailedItems = useCallback(async () => {
     const items = await getFailedItems();
@@ -408,6 +413,7 @@ export default function RecordingsScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      sweepOldExports(); // exports antigos (Markdown com PHI) em cache/exports
       loadRecordings();
       getAllTemplates()
         .then((templates) => setAllTemplates(templates))
@@ -557,8 +563,10 @@ export default function RecordingsScreen() {
         player.pause();
         setPlayingUri(null);
       }
-      await FileSystem.deleteAsync(item.uri, { idempotent: true });
+      // Metadados primeiro: o DELETE grava o tombstone (trigger) na mesma operação, então o
+      // sync remove o item remoto antes de qualquer pull. Se falhar, nada foi apagado.
       await deleteRecordingMeta(item.fileName);
+      await FileSystem.deleteAsync(item.uri, { idempotent: true });
       // Remove from offline queue — file no longer exists
       await dequeueTranscription(item.fileName);
       await refreshQueueCount();
