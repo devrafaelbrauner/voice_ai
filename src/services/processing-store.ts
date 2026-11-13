@@ -32,15 +32,16 @@ import {
   summarizeText,
   summarizeTextStream,
   isTranscriptionError,
-  TranscriptionError,
   type TranscriptionErrorKind,
 } from './openai';
-import { setField, extractPatientName } from './db';
+import { setField, extractPatientName, getPendingDeletions } from './db';
 import {
   enqueueTranscription,
   dequeueTranscription,
+  getQueueCount,
   isRetryableTranscriptionError,
   processQueue,
+  type DrainStopReason,
 } from './transcription-queue';
 import { logError, logWarn } from './log';
 
@@ -61,25 +62,77 @@ export interface ProcessingItem {
 
 /** Última falha de transcrição de uma gravação (por fileName), para a UI. */
 export interface TranscriptionFailure {
-  /** 'unknown' = erro que não é TranscriptionError (ex.: falha ao gravar no banco). */
-  kind: TranscriptionErrorKind | 'unknown';
+  /**
+   * 'unknown' = erro que não é TranscriptionError (ex.: falha ao gravar no banco).
+   * 'no_speech' = o áudio não tem fala reconhecível (nada foi gravado; áudio mantido).
+   */
+  kind: TranscriptionErrorKind | 'unknown' | 'no_speech';
   message: string;
   /** True quando a gravação ficou na fila offline para nova tentativa automática. */
   queued: boolean;
+}
+
+/** Resultado de uma drenagem da fila offline (único caminho de drain do app). */
+export interface DrainResult {
+  /** Transcrições gravadas no banco nesta drenagem. */
+  processed: number;
+  /** Itens que falharam ou não tinham fala (detalhe em `errors`). */
+  failed: number;
+  /** Itens ainda pendentes na fila (exclui os com falha permanente). */
+  remaining: number;
+  /**
+   * Por que parou antes do fim (ou nem começou): 'network' | 'rate_limit' |
+   * 'invalid_key' | 'forbidden' | 'quota' | 'already_running'.
+   */
+  stoppedBy?: DrainStopReason | 'already_running';
+  /**
+   * Falha por fileName. `kind`: kind do TranscriptionError, 'unknown' ou
+   * 'no_speech'. A chave '*' = erro da própria drenagem (não de um item).
+   */
+  errors: Record<string, { kind: string; message: string }>;
+}
+
+export interface DrainOptions {
+  /** Ação explícita do usuário: ignora o intervalo mínimo, o cooldown dos itens e a pausa por erro de configuração. */
+  ignoreCooldown?: boolean;
 }
 
 /** Intervalo mínimo entre drenagens automáticas da fila (anti re-drain, C3-05). */
 const MIN_DRAIN_INTERVAL_MS = 5_000;
 
 let lastDrainAt = 0;
+let drainInFlight = false;
+
+/**
+ * A gravação ainda existe? Ela some se o usuário a exclui enquanto a
+ * transcrição está em voo: o áudio é apagado e a exclusão deixa tombstone.
+ * Gravar o texto nesse caso ressuscitaria uma linha-fantasma (LGPD). Falha ao
+ * checar lança: o item fica na fila e é tentado de novo, nada se perde.
+ */
+async function recordingStillExists(fileName: string, uri: string): Promise<boolean> {
+  const info = await FileSystem.getInfoAsync(uri);
+  if (!info.exists) return false;
+  const pending = await getPendingDeletions();
+  return !pending.some((p) => p.kind === 'recording' && p.key === fileName);
+}
 
 /**
  * Grava a transcrição, tira o item da fila e apaga o áudio bruto.
  * Bug #8: o .m4a (PHI) não deve permanecer em disco sem proteção depois que o
  * texto está cifrado no SQLite. Só roda após sucesso confirmado — em qualquer
- * falha o áudio permanece.
+ * falha o áudio permanece. Se a gravação foi excluída durante o voo, não grava
+ * nada ('discarded') e só tira o item da fila.
  */
-async function saveTranscriptAndCleanup(fileName: string, uri: string, text: string): Promise<void> {
+async function saveTranscriptAndCleanup(
+  fileName: string,
+  uri: string,
+  text: string
+): Promise<'saved' | 'discarded'> {
+  if (!(await recordingStillExists(fileName, uri))) {
+    logWarn('processing-store.discard', 'recording deleted during transcription; transcript discarded');
+    await dequeueTranscription(fileName);
+    return 'discarded';
+  }
   await setField(fileName, 'transcript', text);
   await dequeueTranscription(fileName);
   try {
@@ -91,6 +144,7 @@ async function saveTranscriptAndCleanup(fileName: string, uri: string, text: str
     // Falha silenciosa: não bloquear o fluxo por erro de limpeza
     logWarn('processing-store.deleteAudio', deleteErr);
   }
+  return 'saved';
 }
 
 interface ProcessingState {
@@ -117,11 +171,13 @@ interface ProcessingState {
   /** Inicia processamento IA em background. Idempotente: ignora se já em andamento. */
   startProcessing: (item: ProcessingItem, templateId: string) => void;
   /**
-   * Drena a fila offline (itens por fileName, respeitando cooldown). Não
-   * reentrante e com intervalo mínimo; nunca lança. Chamada automática quando
-   * o app volta ao primeiro plano (AppState 'active').
+   * Drena a fila offline (itens por fileName, respeitando cooldown). ÚNICO
+   * caminho de drain: a tela de Gravações chama este método. Não reentrante
+   * ('already_running'); sem `ignoreCooldown` respeita o intervalo mínimo.
+   * Nunca lança nem exibe UI: quem chama mostra o DrainResult. Chamada
+   * automática (sem UI) quando o app volta ao primeiro plano.
    */
-  drainOfflineQueue: () => Promise<void>;
+  drainOfflineQueue: (opts?: DrainOptions) => Promise<DrainResult>;
 
   /** Helper para verificar estado sem re-renderizar toda vez. */
   isTranscribing: (fileName: string) => boolean;
@@ -174,6 +230,7 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
           return;
         }
 
+        // 'discarded' = a gravação foi excluída durante a transcrição: nada a mostrar.
         await saveTranscriptAndCleanup(item.fileName, item.uri, text);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -228,33 +285,42 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
 
   // ── Fila offline ────────────────────────────────────────────────────────────
 
-  async drainOfflineQueue() {
-    const now = Date.now();
-    if (now - lastDrainAt < MIN_DRAIN_INTERVAL_MS) return;
-    lastDrainAt = now;
+  async drainOfflineQueue(opts = {}) {
+    const result: DrainResult = { processed: 0, failed: 0, remaining: 0, errors: {} };
+    const pendingCount = () => getQueueCount().catch(() => 0);
+
+    if (drainInFlight) {
+      return { ...result, remaining: await pendingCount(), stoppedBy: 'already_running' };
+    }
+    if (!opts.ignoreCooldown && Date.now() - lastDrainAt < MIN_DRAIN_INTERVAL_MS) {
+      return { ...result, remaining: await pendingCount() };
+    }
+    drainInFlight = true;
     try {
-      // Falha na fila: reflete na UI por fileName (inclui invalid_key/forbidden,
-      // que são de configuração e não gastam tentativa do item).
-      const recordFailure = (fileName: string, err: unknown) =>
+      // Falha por item: reflete na UI (transcriptionErrors) e no resultado. Inclui
+      // invalid_key/forbidden/quota, que são de configuração e não gastam tentativa.
+      const recordFailure = (fileName: string, err: unknown) => {
+        const kind = isTranscriptionError(err) ? err.kind : 'unknown';
+        const message = err instanceof Error ? err.message : String(err);
+        result.errors[fileName] = { kind, message };
         set((s) => ({
-          transcriptionErrors: {
-            ...s.transcriptionErrors,
-            [fileName]: {
-              kind: isTranscriptionError(err) ? err.kind : 'unknown',
-              message: err instanceof Error ? err.message : String(err),
-              queued: true,
-            },
-          },
+          transcriptionErrors: { ...s.transcriptionErrors, [fileName]: { kind, message, queued: true } },
         }));
+      };
+      const clearFailure = (fileName: string) =>
+        set((s) => {
+          const { [fileName]: _cleared, ...restErrors } = s.transcriptionErrors;
+          return { transcriptionErrors: restErrors };
+        });
+      let noSpeech = 0;
+      let discarded = 0;
+
       const summary = await processQueue(
         async (uri, queued) => {
           // Marca a gravação como "transcrevendo" enquanto a fila trabalha nela.
           set((s) => ({ transcribingFiles: new Set([...s.transcribingFiles, queued.fileName]) }));
           try {
             return { text: await transcribeAudio(uri) };
-          } catch (err) {
-            recordFailure(queued.fileName, err);
-            throw err;
           } finally {
             set((s) => ({
               transcribingFiles: new Set([...s.transcribingFiles].filter((f) => f !== queued.fileName)),
@@ -263,27 +329,49 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
         },
         async (queued, text) => {
           if (!text || text.trim().length === 0) {
-            const empty = new TranscriptionError('bad_response', 'O áudio não contém fala reconhecível.', {
-              code: 'vazio',
-            });
-            recordFailure(queued.fileName, empty);
-            throw empty;
+            // "Sem fala": nunca grava ''. O item sai da fila (a cadeia já tentou
+            // todos os passos) e o áudio fica para o usuário ouvir/regravar.
+            const message = 'Nenhuma fala detectada no áudio.';
+            result.errors[queued.fileName] = { kind: 'no_speech', message };
+            set((s) => ({
+              transcriptionErrors: {
+                ...s.transcriptionErrors,
+                [queued.fileName]: { kind: 'no_speech', message, queued: false },
+              },
+            }));
+            noSpeech++;
+            return;
           }
-          await saveTranscriptAndCleanup(queued.fileName, queued.uri, text);
-          set((s) => {
-            const { [queued.fileName]: _cleared, ...restErrors } = s.transcriptionErrors;
-            return { transcriptionErrors: restErrors };
-          });
+          const saved = await saveTranscriptAndCleanup(queued.fileName, queued.uri, text);
+          clearFailure(queued.fileName);
+          if (saved === 'saved') result.processed++;
+          else discarded++;
         },
-        // Gravação que o usuário está transcrevendo à mão não entra na fila agora.
-        { skip: (queued) => get().transcribingFiles.has(queued.fileName) }
+        {
+          ignoreCooldown: opts.ignoreCooldown,
+          // Gravação que o usuário está transcrevendo à mão não entra na fila agora.
+          skip: (queued) => get().transcribingFiles.has(queued.fileName),
+          onItemError: (queued, err) => recordFailure(queued.fileName, err),
+        }
       );
-      if (summary.processed > 0 || summary.failed > 0 || summary.permanentlyFailed > 0) {
+      result.failed = summary.failed + summary.permanentlyFailed + noSpeech;
+      result.remaining = summary.remaining;
+      result.stoppedBy = summary.alreadyRunning ? 'already_running' : summary.stoppedBy;
+      if (result.processed > 0 || result.failed > 0 || discarded > 0) {
         set((s) => ({ completionCount: s.completionCount + 1 }));
       }
     } catch (err) {
       logWarn('processing-store.drain', err);
+      result.errors['*'] = {
+        kind: isTranscriptionError(err) ? err.kind : 'unknown',
+        message: err instanceof Error ? err.message : String(err),
+      };
+      result.remaining = await pendingCount();
+    } finally {
+      drainInFlight = false;
+      lastDrainAt = Date.now();
     }
+    return result;
   },
 
   // ── Processamento IA (streaming) ────────────────────────────────────────────

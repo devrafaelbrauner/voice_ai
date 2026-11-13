@@ -189,7 +189,7 @@ async function runMigrations(db: SQLite.SQLiteDatabase) {
 // apaga o tombstone depois de confirmar que o remoto não tem mais o item.
 // NÃO existe trigger AFTER INSERT que apague tombstone (apagaria às cegas um tombstone
 // recém-criado — SC-01): re-criação legítima limpa o tombstone explicitamente no código
-// (setField, restore de backup). INSERT OR REPLACE não dispara triggers de DELETE
+// (restore de backup). INSERT OR REPLACE não dispara triggers de DELETE
 // (recursive_triggers é OFF por padrão), então o pull não gera tombstones.
 const TOMBSTONE_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS pending_deletions (
@@ -650,26 +650,34 @@ export async function getField(
   return SENSITIVE_FIELDS.includes(field) ? decrypt(raw) : raw;
 }
 
+/**
+ * Grava um campo. NÃO recria linha de gravação excluída: se há tombstone do fileName,
+ * nada é gravado e retorna false (escrita tardia após exclusão — transcrição em voo,
+ * drain em curso — não pode ressuscitar PHI nem reenviá-lo ao Supabase). Nomes de
+ * arquivo são únicos, então setField nunca precisa limpar tombstone; o restore de
+ * backup limpa o seu. Para linha já existente (sem tombstone) é um UPDATE normal.
+ * O NOT EXISTS está no próprio INSERT (atômico, sem janela entre checar e gravar).
+ */
 export async function setField(
   fileName: string,
   field: Field,
   value: string
-): Promise<void> {
+): Promise<boolean> {
   const db = await getDb();
   const now = new Date().toISOString();
   const valueToStore = SENSITIVE_FIELDS.includes(field) ? await encrypt(value) : value;
-  await db.runAsync(
-    `INSERT INTO recordings (fileName, ${field}, updatedAt) VALUES (?, ?, ?)
+  const res = await db.runAsync(
+    `INSERT INTO recordings (fileName, ${field}, updatedAt)
+     SELECT ?, ?, ?
+     WHERE NOT EXISTS (
+       SELECT 1 FROM pending_deletions WHERE kind = 'recording' AND key = ?
+     )
      ON CONFLICT(fileName) DO UPDATE SET ${field} = excluded.${field}, updatedAt = excluded.updatedAt`,
-    [fileName, valueToStore, now]
+    [fileName, valueToStore, now, fileName]
   );
-  // Re-criação legítima: limpa o tombstone ANTERIOR a esta escrita. `deletedAt <= now`
-  // preserva um tombstone de exclusão feita depois dela (corrida delete/setField).
-  await db.runAsync(
-    `DELETE FROM pending_deletions WHERE kind = 'recording' AND key = ? AND deletedAt <= ?`,
-    [fileName, now]
-  );
+  if (res.changes === 0) return false;
   notifyChange();
+  return true;
 }
 
 export async function clearField(

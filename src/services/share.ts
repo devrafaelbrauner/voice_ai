@@ -1,4 +1,4 @@
-import { Linking, Share, Alert } from 'react-native';
+import { Linking, Share, Alert, AppState } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
@@ -85,7 +85,7 @@ export function createExportFile(fileName: string): File {
 
 /**
  * Apaga exports antigos (e restos de versões anteriores que gravavam na raiz do cache).
- * Best-effort: nunca lança. Chamar ao abrir Config e Gravações.
+ * Best-effort: nunca lança. Chamado ao abrir Config/Gravações e em AppState 'active'.
  */
 export async function sweepOldExports(maxAgeMs: number = EXPORT_MAX_AGE_MS): Promise<void> {
   const cutoff = Date.now() - maxAgeMs;
@@ -119,6 +119,13 @@ export async function sweepOldExports(maxAgeMs: number = EXPORT_MAX_AGE_MS): Pro
     // idem
   }
 }
+
+// Único gatilho de sweep em segundo plano: ao voltar ao primeiro plano (o app destino já
+// leu o arquivo). Markdown com PHI não fica no cache até o usuário abrir Config/Gravações.
+// Registrado uma vez no carregamento do módulo (como os demais listeners de serviço).
+AppState.addEventListener('change', (state) => {
+  if (state === 'active') void sweepOldExports();
+});
 
 // ─── Markdown (.md) file export ─────────────────────────────────────────────
 

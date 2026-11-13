@@ -174,11 +174,13 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
                     <Pressable
                       onPress={() => setShow((s) => !s)}
                       disabled={busy}
-                      hitSlop={8}
+                      hitSlop={4}
                       accessibilityRole="button"
                       accessibilityLabel={show ? 'Ocultar senha' : 'Mostrar senha'}
+                      accessibilityState={{ disabled: busy }}
+                      style={{ minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}
                     >
-                      {show ? <EyeOff size={20} color={c.textSecondary} /> : <Eye size={20} color={c.textSecondary} />}
+                      {show ? <EyeOff size={22} color={c.textSecondary} /> : <Eye size={22} color={c.textSecondary} />}
                     </Pressable>
                   </XStack>
                 </YStack>

@@ -264,6 +264,7 @@ async function expoFetchWithTimeout(
 export type TranscriptionErrorKind =
   | 'invalid_key'
   | 'forbidden'
+  | 'quota'
   | 'timeout'
   | 'rate_limit'
   | 'server'
@@ -274,6 +275,8 @@ export type TranscriptionErrorKind =
 const DEFAULT_TRANSIENT: Record<TranscriptionErrorKind, boolean> = {
   invalid_key: false,
   forbidden: false,
+  // Cota/crédito esgotado: erro de configuração do provedor; esperar não resolve.
+  quota: false,
   timeout: true,
   rate_limit: true,
   server: true,
@@ -322,6 +325,7 @@ export function isTranscriptionError(err: unknown): err is TranscriptionError {
 const KIND_MESSAGES: Record<TranscriptionErrorKind, string> = {
   invalid_key: 'Credencial de transcrição inválida ou expirada. Verifique em Configurações.',
   forbidden: 'Acesso negado pelo serviço de transcrição. Verifique permissões e limites da chave.',
+  quota: 'Cota ou crédito do provedor de transcrição esgotado. Verifique o plano e o saldo do provedor.',
   timeout: 'Tempo esgotado ao transcrever. Verifique sua conexão e tente novamente.',
   rate_limit: 'Limite de requisições do serviço de transcrição atingido. Tente novamente em instantes.',
   server: 'Serviço de transcrição indisponível no momento.',
@@ -350,25 +354,37 @@ function sanitizeProviderMessage(message: unknown): string | undefined {
   return compact.slice(0, 80);
 }
 
-function parseProviderError(body: string): { code?: string; message?: string } {
+// `quota` = o provedor diz que a cota/crédito acabou (código/tipo `insufficient_quota`
+// da OpenAI, ou mensagem equivalente). A mensagem crua só é lida aqui para isso: nunca
+// é guardada nem logada.
+const QUOTA_MESSAGE_RE = /insufficient[_ ](?:quota|credits?)|exceeded your current quota|out of credits?/i;
+
+function parseProviderError(body: string): { code?: string; message?: string; quota: boolean } {
   try {
     const parsed: unknown = JSON.parse(body);
     if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) {
       const e = parsed.error;
       if (typeof e === 'object' && e !== null) {
+        const code = 'code' in e && typeof e.code === 'string' ? e.code : undefined;
+        const type = 'type' in e && typeof e.type === 'string' ? e.type : undefined;
+        const raw = 'message' in e && typeof e.message === 'string' ? e.message : '';
         return {
-          code: 'code' in e && typeof e.code === 'string' ? e.code : undefined,
+          code,
           message: 'message' in e ? sanitizeProviderMessage(e.message) : undefined,
+          quota:
+            code === 'insufficient_quota' ||
+            type === 'insufficient_quota' ||
+            QUOTA_MESSAGE_RE.test(raw),
         };
       }
     }
   } catch {
     // corpo não-JSON: sem detalhe
   }
-  return {};
+  return { quota: false };
 }
 
-/** Classifica uma resposta HTTP não-2xx por status (nunca por texto da mensagem). */
+/** Classifica uma resposta HTTP não-2xx por status; o corpo só serve para distinguir cota esgotada (429) de limite de taxa. */
 export function classifyHttpError(
   status: number,
   retryAfterHeader?: string | null,
@@ -381,15 +397,24 @@ export function classifyHttpError(
   if (status === 403) {
     return new TranscriptionError('forbidden', KIND_MESSAGES.forbidden, { status });
   }
+  if (status === 402) {
+    // OpenRouter: crédito insuficiente.
+    return new TranscriptionError('quota', KIND_MESSAGES.quota, { status, code: provider.code });
+  }
   if (status === 408) {
     return new TranscriptionError('timeout', KIND_MESSAGES.timeout, { status });
   }
   if (status === 429) {
+    if (provider.quota) {
+      // Cota esgotada não se resolve esperando: erro de configuração, não de limite de taxa.
+      return new TranscriptionError('quota', KIND_MESSAGES.quota, {
+        status,
+        code: provider.code ?? 'insufficient_quota',
+      });
+    }
     return new TranscriptionError('rate_limit', KIND_MESSAGES.rate_limit, {
       status,
       retryAfterMs: parseRetryAfter(retryAfterHeader),
-      // Cota esgotada não se resolve esperando alguns segundos.
-      transient: provider.code !== 'insufficient_quota',
       code: provider.code,
     });
   }
@@ -573,6 +598,11 @@ export function checkTranscriptSanity(text: string): TranscriptSanityCode | null
 
 /** `code` de credencial ausente (erro de configuração, sem recuo). */
 const NO_CREDENTIAL = 'no_credential';
+
+/** `code` de arquivo de áudio ilegível/ausente (erro permanente do item, não de rede). */
+const FILE_ERROR_CODE = 'file';
+const FILE_ERROR_MESSAGE = 'Não foi possível ler o arquivo de áudio desta gravação.';
+
 const FALLBACK_CHAIN: readonly TranscriptionModelId[] = [
   'openai/gpt-4o-mini-transcribe',
   'whisper-1',
@@ -646,10 +676,18 @@ async function postTranscription(
   signal?.addEventListener('abort', onAbort, { once: true });
   if (signal?.aborted) controller.abort();
   try {
+    // Ler o arquivo/montar o FormData falha por problema do ITEM (arquivo ilegível), não da
+    // rede: erro permanente do item, para não derrubar a drenagem inteira como 'network'.
+    let form: FormData;
+    try {
+      form = buildForm();
+    } catch {
+      throw new TranscriptionError('bad_response', FILE_ERROR_MESSAGE, { code: FILE_ERROR_CODE });
+    }
     const response = await expoFetch(url, {
       method: 'POST',
       headers,
-      body: buildForm(),
+      body: form,
       signal: controller.signal,
     });
     const body = await response.text();
@@ -789,8 +827,9 @@ export interface TranscribeOptions {
  * Cadeia (ver transcriptionChainFor): escolhido → gpt-4o-mini-transcribe →
  * whisper-1, restrita ao provedor do escolhido. Recua em falha transitória
  * persistente (após os retries), timeout ou texto recusado. Falha permanente
- * do escolhido (401/403/400…) é lançada na hora. Texto vazio em todos os
- * passos que responderam devolve '' (o chamador mostra "nenhuma fala").
+ * do escolhido (401/403/400…) é lançada na hora. Só devolve '' se TODOS os
+ * passos tentados responderam vazio (o chamador mostra "nenhuma fala"); se
+ * algum falhou e nenhum deu texto, lança o erro (transitório vence).
  */
 export async function transcribeWithChain(
   uri: string,
@@ -802,7 +841,6 @@ export async function transcribeWithChain(
   const mode = await getOpenAIMode();
   const failures: TranscriptionError[] = [];
   let emptyAnswers = 0;
-  let otherRefusals = 0;
 
   const chain = transcriptionChainFor(chosen);
   for (let i = 0; i < chain.length; i++) {
@@ -819,13 +857,13 @@ export async function transcribeWithChain(
       const refused = checkTranscriptSanity(text);
       if (refused === null) return text;
       if (refused === 'vazio') emptyAnswers++;
-      else otherRefusals++;
       failures.push(
         new TranscriptionError('bad_response', `Texto recusado pela checagem de sanidade (${refused}).`, {
           code: refused,
         })
       );
-      logWarn('transcribe', `step ${model} refused: ${refused}`);
+      // Só contagens (nunca o texto: é PHI).
+      logWarn('transcribe', `step ${model} refused: ${refused} (${text.length} chars, ${wordsOf(text).length} words)`);
     } catch (e) {
       const err = classifyThrown(e, { timedOut: false, callerAborted: !!options.signal?.aborted });
       if (err.kind === 'cancelled') throw err;
@@ -837,7 +875,7 @@ export async function transcribeWithChain(
     }
   }
 
-  if (emptyAnswers > 0 && otherRefusals === 0) return '';
+  if (failures.length > 0 && emptyAnswers === failures.length) return '';
   // Transitório vence permanente: a fila deve tentar de novo mais tarde.
   throw failures.find((f) => f.transient) ?? failures[0];
 }
@@ -876,6 +914,13 @@ export async function transcribeAudio(
   uri: string,
   options: { signal?: AbortSignal } = {}
 ): Promise<string> {
+  let audioMissing = false;
+  try {
+    audioMissing = !(await FileSystem.getInfoAsync(uri)).exists;
+  } catch {
+    // não deu para checar: segue e deixa o upload decidir
+  }
+  if (audioMissing) throw new TranscriptionError('bad_response', FILE_ERROR_MESSAGE, { code: FILE_ERROR_CODE });
   const audioBytes = await getAudioBytes(uri);
   if (audioBytes > 0 && audioBytes < MIN_TRANSCRIBE_AUDIO_BYTES) {
     throw new TranscriptionError(

@@ -498,9 +498,17 @@ export async function pickBackupFile(): Promise<PickedBackup | null> {
   });
   if (res.canceled || !res.assets?.[0]) return null;
   const asset = res.assets[0];
-  if (typeof asset.size === 'number' && asset.size > MAX_BACKUP_BYTES) {
+  // A cópia em cache já existe aqui: qualquer falha da checagem de tamanho a apaga.
+  // O size do asset pode faltar; o tamanho real da cópia é a fonte de verdade.
+  try {
+    let size = asset.size;
+    if (typeof size !== 'number') size = new File(asset.uri).size;
+    if (typeof size === 'number' && size > MAX_BACKUP_BYTES) {
+      throw new Error('O arquivo tem mais de 50 MB e não é um backup válido.');
+    }
+  } catch (err) {
     discardPickedFile(asset.uri);
-    throw new Error('O arquivo tem mais de 50 MB e não é um backup válido.');
+    throw err;
   }
   return { uri: asset.uri, name: asset.name };
 }

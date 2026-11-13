@@ -41,7 +41,6 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Clipboard from 'expo-clipboard';
 import { Link, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import {
-  transcribeAudio,
   BUILTIN_TEMPLATES,
   getAllTemplates,
   PromptTemplate,
@@ -54,6 +53,7 @@ import {
 } from '../services/db';
 import {
   useProcessingStore,
+  type DrainResult,
 } from '../services/processing-store';
 import { formatDefaultName } from '../services/recordings';
 import { openShareMenu, exportToMarkdown, sweepOldExports } from '../services/share';
@@ -76,9 +76,39 @@ import {
   getFailedCount,
   getFailedItems,
   clearFailedItems,
-  processQueue,
 } from '../services/transcription-queue';
 
+
+/** Mensagens por motivo de parada do drain / tipo de erro. */
+const STOP_MESSAGES: Partial<Record<string, string>> = {
+  invalid_key: 'Chave de API inválida. Corrija a chave de API em Configurações.',
+  forbidden: 'Chave de API sem permissão. Corrija a chave de API em Configurações.',
+  quota: 'Cota/crédito do provedor esgotado. Recarregue o crédito ou troque a chave em Configurações.',
+  network: 'Sem conexão, tentará novamente.',
+  rate_limit: 'Limite de requisições do provedor atingido, tentará novamente em instantes.',
+  already_running: 'A fila já está sendo processada.',
+};
+/** Tipos de erro exibidos no aviso da fila, do mais urgente ao menos. */
+const KIND_PRIORITY = ['invalid_key', 'forbidden', 'quota', 'network', 'rate_limit'];
+/** Paradas que exigem ação do usuário (chave/cota): título do alerta muda. */
+const ACTION_REQUIRED: Record<string, true> = { invalid_key: true, forbidden: true, quota: true };
+
+/** Texto do resultado de um drain manual. */
+function describeDrainResult(res: DrainResult): string {
+  const parts: string[] = [];
+  if (res.processed > 0) parts.push(`✅ ${res.processed} transcrita(s) com sucesso`);
+  if (res.failed > 0) parts.push(`⚠️ ${res.failed} não transcrita(s)`);
+  const stopMsg = res.stoppedBy ? STOP_MESSAGES[res.stoppedBy] : undefined;
+  if (stopMsg) parts.push(stopMsg);
+  // Erros por item que não são o motivo de parada (ex.: áudio sem fala, resposta inválida).
+  const extra = new Set<string>();
+  for (const e of Object.values(res.errors)) {
+    if (!STOP_MESSAGES[e.kind]) extra.add(e.message);
+  }
+  parts.push(...[...extra].slice(0, 2));
+  if (res.remaining > 0) parts.push(`${res.remaining} ainda na fila`);
+  return parts.length > 0 ? parts.join('\n') : 'Nenhuma transcrição pendente.';
+}
 
 const stripMarkers = (s: string) =>
   s.replace(/\s*\[(C[1-5]|RDC\s*20|SIMPLES)\]/g, '');
@@ -225,6 +255,7 @@ export default function RecordingsScreen() {
     processingFiles,
     streamingContent,
     completionCount,
+    transcriptionErrors,
     startTranscription,
     startProcessing,
   } = useProcessingStore();
@@ -248,6 +279,17 @@ export default function RecordingsScreen() {
   const [queueCount, setQueueCount] = useState(0);
   const [failedCount, setFailedCount] = useState(0);
   const [isProcessingQueue, setIsProcessingQueue] = useState(false);
+  // Último motivo de parada do drain (rede, chave, cota…): alimenta o aviso da fila.
+  const [lastDrainStop, setLastDrainStop] = useState<DrainResult['stoppedBy'] | null>(null);
+  // Aviso da fila: erros por gravação (também de drains disparados pelo AppState) têm
+  // prioridade; senão, o motivo de parada do último drain desta tela.
+  const queueNotice = useMemo(() => {
+    const queuedKinds: string[] = Object.values(transcriptionErrors)
+      .filter((e) => e.queued)
+      .map((e) => e.kind);
+    const top = KIND_PRIORITY.find((k) => queuedKinds.includes(k)) ?? lastDrainStop;
+    return top ? STOP_MESSAGES[top] ?? null : null;
+  }, [transcriptionErrors, lastDrainStop]);
 
   // Template picker modal (replaces ActionSheet for "Processar com IA")
   const [templatePickerVisible, setTemplatePickerVisible] = useState(false);
@@ -266,36 +308,31 @@ export default function RecordingsScreen() {
 
   // Guard por ref (não por state): com state em deps o useFocusEffect re-disparava a cada
   // ciclo de processamento (~800 ms) enquanto a tela estava focada. O state segue só para a UI.
+  // O drain em si é UNICAMENTE o da store (drainOfflineQueue): cooldown, skip de itens em
+  // transcrição manual, salvamento seguro e remoção do áudio vivem lá.
+  // `manual` = botão "Tentar agora": ignora o cooldown e sempre mostra o resultado.
+  // Automático (ao focar): só alerta se transcreveu algo; erros ficam no banner da fila.
   const processingQueueRef = useRef(false);
-  const processOfflineQueue = useCallback(async () => {
+  const processOfflineQueue = useCallback(async (manual: boolean = false) => {
     if (processingQueueRef.current) return;
     processingQueueRef.current = true;
     setIsProcessingQueue(true);
     try {
-      const { processed, failed, permanentlyFailed, remaining } = await processQueue(
-        async (uri) => ({ text: await transcribeAudio(uri) }),
-        async (item, transcript) => {
-          await setField(item.fileName, 'transcript', transcript);
-          setRecordings((prev) =>
-            prev.map((r) =>
-              r.fileName === item.fileName ? { ...r, transcript } : r
-            )
-          );
-        }
-      );
-
-      const parts: string[] = [];
-      if (processed > 0) parts.push(`✅ ${processed} transcrita(s) com sucesso`);
-      if (failed > 0) parts.push(`⚠️ ${failed} falhou (tentará novamente depois)`);
-      if (permanentlyFailed > 0) parts.push(`❌ ${permanentlyFailed} com erro permanente (arquivo ausente ou muitas tentativas)`);
-      if (remaining > 0) parts.push(`${remaining} ainda na fila`);
-
-      if (processed > 0 || failed > 0 || permanentlyFailed > 0) {
-        Alert.alert('Fila offline', parts.join('\n'));
+      const result = await useProcessingStore
+        .getState()
+        .drainOfflineQueue(manual ? { ignoreCooldown: true } : undefined);
+      setLastDrainStop(result.stoppedBy ?? null);
+      if (manual || result.processed > 0) {
+        Alert.alert(
+          result.stoppedBy && ACTION_REQUIRED[result.stoppedBy]
+            ? 'Fila offline — ação necessária'
+            : 'Fila offline',
+          describeDrainResult(result)
+        );
       }
     } catch (err) {
       logWarn('queue', err);
-      Alert.alert('Erro na fila', 'Não foi possível processar a fila offline.');
+      if (manual) Alert.alert('Erro na fila', 'Não foi possível processar a fila offline.');
     } finally {
       processingQueueRef.current = false;
       setIsProcessingQueue(false);
@@ -856,6 +893,7 @@ export default function RecordingsScreen() {
     () => ({
       playingUri,
       transcribingFiles,
+      transcriptionErrors,
       processingFiles,
       streamingContent,
       exportingUri,
@@ -863,7 +901,7 @@ export default function RecordingsScreen() {
       copiedKey,
       editValue,
     }),
-    [playingUri, transcribingFiles, processingFiles, streamingContent, exportingUri, editingFile, copiedKey, editValue]
+    [playingUri, transcribingFiles, transcriptionErrors, processingFiles, streamingContent, exportingUri, editingFile, copiedKey, editValue]
   );
 
   return (
@@ -894,12 +932,12 @@ export default function RecordingsScreen() {
                 <Text fontSize={11} color={c.textSecondary}>
                   {isProcessingQueue
                     ? 'Processando agora…'
-                    : 'Tentaremos processar quando a conexão retornar.'}
+                    : queueNotice ?? 'Tentaremos processar quando a conexão retornar.'}
                 </Text>
               </YStack>
               {!isProcessingQueue && (
                 <Pressable
-                  onPress={processOfflineQueue}
+                  onPress={() => processOfflineQueue(true)}
                   accessibilityRole="button"
                   accessibilityLabel="Tentar processar fila offline agora"
                 >
@@ -1389,6 +1427,8 @@ export default function RecordingsScreen() {
             renderItem={({ item }) => {
               const isThisPlaying = playingUri === item.uri && status?.playing;
               const isTranscribing = transcribingFiles.has(item.fileName);
+              const failure = isTranscribing ? undefined : transcriptionErrors[item.fileName];
+              const txError = failure ? STOP_MESSAGES[failure.kind] ?? failure.message : null;
               const isProcessing = processingFiles.has(item.fileName);
               const liveContent = streamingContent[item.fileName] ?? '';
               const isEditing = editingFile === item.fileName;
@@ -1823,6 +1863,17 @@ export default function RecordingsScreen() {
                       )}
                     </YStack>
                   ) : (
+                    <>
+                    {txError && (
+                      <Text
+                        fontSize={12}
+                        color={c.accentOrange}
+                        accessibilityRole="alert"
+                        accessibilityLiveRegion="polite"
+                      >
+                        {txError}
+                      </Text>
+                    )}
                     <Pressable
                       onPress={() => handleTranscribe(item)}
                       disabled={isTranscribing || !item.localFileExists}
@@ -1874,6 +1925,7 @@ export default function RecordingsScreen() {
                         )}
                       </XStack>
                     </Pressable>
+                    </>
                   )}
                 </YStack>
                 </Swipeable>

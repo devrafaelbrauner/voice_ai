@@ -74,6 +74,15 @@ function setRunStatus(run: SyncRun, s: SyncStatus) {
   if (!run.aborted) setStatus(s);
 }
 
+/**
+ * Status de falha do chamador. Run abortado pelo watchdog (ou que falhou enquanto outro
+ * run já assumiu o lock) NÃO sobrescreve o status do run vigente; o erro continua
+ * sendo devolvido/logado ao chamador.
+ */
+function setFailedStatus() {
+  if (!activeLock) setStatus('error');
+}
+
 let activeLock: { released: Promise<void> } | null = null;
 
 /**
@@ -180,6 +189,10 @@ const DELETION_TARGETS = [
  * Envia as exclusões locais pendentes ao Supabase. O tombstone só é removido depois
  * que um SELECT confirma que o remoto não tem mais o item. Se não confirmar, o
  * tombstone permanece (e o pull não ressuscita o item) até a próxima tentativa.
+ *
+ * Erro em um chunk (rede, RLS, coluna) é isolado: o tombstone do chunk é mantido, o erro
+ * é logado e o flush segue para os demais chunks — um tombstone com erro persistente
+ * nunca bloqueia pull/push. Só o abort do watchdog interrompe o flush.
  */
 async function flushDeletions(userId: string, run: SyncRun): Promise<number> {
   const pending = await getPendingDeletions();
@@ -191,27 +204,39 @@ async function flushDeletions(userId: string, run: SyncRun): Promise<number> {
       assertRun(run);
       const chunk = items.slice(i, i + DELETE_CHUNK);
       const keys = chunk.map((c) => c.key);
-      const del = await supabase
-        .from(target.table)
-        .delete()
-        .eq('user_id', userId)
-        .in(target.col, keys);
-      if (del.error) throw del.error;
+      try {
+        const del = await supabase
+          .from(target.table)
+          .delete()
+          .eq('user_id', userId)
+          .in(target.col, keys);
+        if (del.error) throw del.error;
 
-      const check = await supabase
-        .from(target.table)
-        .select(target.col)
-        .eq('user_id', userId)
-        .in(target.col, keys);
-      if (check.error) throw check.error;
-      const remaining = new Set(
-        ((check.data ?? []) as unknown as Record<string, unknown>[]).map((r) => String(r[target.col]))
-      );
-      const done: PendingDeletion[] = chunk.filter((c) => !remaining.has(c.key));
-      await confirmPendingDeletions(done);
-      confirmed += done.length;
-      if (remaining.size > 0) {
-        logError('sync', `exclusão remota não confirmada para ${remaining.size} item(ns) de ${target.table}; tombstone mantido`);
+        const check = await supabase
+          .from(target.table)
+          .select(target.col)
+          .eq('user_id', userId)
+          .in(target.col, keys);
+        if (check.error) throw check.error;
+        const remaining = new Set(
+          ((check.data ?? []) as unknown as Record<string, unknown>[]).map((r) => String(r[target.col]))
+        );
+        const done: PendingDeletion[] = chunk.filter((c) => !remaining.has(c.key));
+        await confirmPendingDeletions(done);
+        confirmed += done.length;
+        if (remaining.size > 0) {
+          logError('sync', `exclusão remota não confirmada para ${remaining.size} item(ns) de ${target.table}; tombstone mantido`);
+        }
+      } catch (err) {
+        if (err instanceof SyncAbortedError) throw err;
+        // Sem chaves/dados no log: só tabela, tamanho do chunk e mensagem do erro.
+        const msg =
+          err instanceof Error
+            ? err.message
+            : typeof err === 'object' && err !== null && 'message' in err
+              ? String(err.message)
+              : String(err);
+        logError('sync', `flush de exclusões falhou em ${target.table} (${chunk.length} item(ns)); tombstones mantidos: ${msg}`);
       }
     }
   }
@@ -551,7 +576,7 @@ export async function syncNow(): Promise<SyncResult> {
       return { pulled, pushed };
     });
   } catch (err: any) {
-    setStatus('error');
+    setFailedStatus();
     return {
       pushed: { recordings: 0, templates: 0, profile: false },
       pulled: { recordings: 0, templates: 0, profile: false },
@@ -574,7 +599,7 @@ export async function pullOnLogin(): Promise<void> {
     });
   } catch (err) {
     logError('sync.pull', err);
-    setStatus('error');
+    setFailedStatus();
   }
 }
 
@@ -599,7 +624,7 @@ export function queueSync() {
       logDebug('sync', 'auto-push concluído');
     } catch (err) {
       logError('sync.autoPush', err);
-      setStatus('error');
+      setFailedStatus();
     }
   }, 3000); // 3 segundos de debounce
 }

@@ -15,10 +15,13 @@
 //      message text:
 //        - network / rate_limit: stop the whole drain (every item would fail
 //          the same way). Not counted towards MAX_ATTEMPTS.
+//        - invalid_key / forbidden / quota: configuration errors (key, permission,
+//          provider credit). Stop the drain, do NOT spend the item's attempts and
+//          pause automatic drains (CONFIG_BLOCK_MS).
 //        - other transient (server/timeout): cooldown, next item. Not counted.
-//        - permanent (invalid_key, forbidden, bad_response, unknown): counted;
-//          after MAX_ATTEMPTS the item is marked permanentlyFailed. The audio
-//          file is never deleted here.
+//        - permanent (bad_response, file, unknown): counted; after MAX_ATTEMPTS
+//          the item is marked permanentlyFailed. The audio file is never deleted
+//          here.
 //
 // Items are identified by `fileName` only (never by array index or uri).
 //
@@ -28,7 +31,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import { logWarn, logDebug } from './log';
-import { isTranscriptionError, type TranscriptionErrorKind } from './openai';
+import { isTranscriptionError, TranscriptionError, type TranscriptionErrorKind } from './openai';
 
 const QUEUE_KEY = '@voice_ai_recorder/transcription_queue/v1';
 
@@ -69,6 +72,9 @@ export interface QueuedTranscription {
   permanentlyFailed?: boolean;
 }
 
+/** Why a drain stopped before going through every due item. */
+export type DrainStopReason = 'network' | 'rate_limit' | 'invalid_key' | 'forbidden' | 'quota';
+
 export interface QueueSummary {
   processed: number;
   failed: number;
@@ -78,6 +84,8 @@ export interface QueueSummary {
   deferred: number;
   /** True when another drain was already running (this call did nothing). */
   alreadyRunning: boolean;
+  /** Set when the drain stopped on a network/rate-limit/config error (or is paused by one). */
+  stoppedBy?: DrainStopReason;
 }
 
 /**
@@ -143,9 +151,12 @@ function errorMessage(err: unknown): string {
   return msg.length > 200 ? `${msg.slice(0, 200)}…` : msg;
 }
 
-/** invalid_key/forbidden: erro de configuração (chave/permissão), não do item. */
+/** invalid_key/forbidden/quota: erro de configuração (chave/permissão/crédito), não do item. */
 function isConfigError(err: unknown): boolean {
-  return isTranscriptionError(err) && (err.kind === 'invalid_key' || err.kind === 'forbidden');
+  return (
+    isTranscriptionError(err) &&
+    (err.kind === 'invalid_key' || err.kind === 'forbidden' || err.kind === 'quota')
+  );
 }
 
 function applyFailure(item: QueuedTranscription, err: unknown, now: number): QueuedTranscription {
@@ -261,6 +272,8 @@ export async function clearFailedItems(): Promise<void> {
 let draining = false;
 /** Após um erro de configuração, drenagens automáticas ficam suspensas até aqui. */
 let configBlockedUntil = 0;
+/** Tipo do erro de configuração que originou a pausa (para devolver `stoppedBy`). */
+let configBlockedKind: DrainStopReason = 'invalid_key';
 const CONFIG_BLOCK_MS = 60_000;
 
 async function summaryNow(partial: Omit<QueueSummary, 'remaining'>): Promise<QueueSummary> {
@@ -275,25 +288,35 @@ async function summaryNow(partial: Omit<QueueSummary, 'remaining'>): Promise<Que
  *   `alreadyRunning: true` and zero counters (callers show no feedback).
  * - Skips items still in cooldown (`nextAttemptAt`) unless `ignoreCooldown`
  *   (explicit user action).
- * - Stops at the first network / rate_limit / invalid_key / forbidden error.
- *   invalid_key/forbidden are configuration errors: they do NOT spend the
- *   item's attempts, and automatic drains pause for 60 s (ignoreCooldown
- *   overrides, e.g. right after the user fixes the key).
+ * - Stops at the first network / rate_limit / invalid_key / forbidden / quota
+ *   error (`stoppedBy` says which). invalid_key/forbidden/quota are
+ *   configuration errors: they do NOT spend the item's attempts, and automatic
+ *   drains pause for 60 s (ignoreCooldown overrides, e.g. right after the user
+ *   fixes the key).
  * - Checks the audio file exists first; if not, marks the item permanently
  *   failed immediately (audio is never deleted by the queue).
  * - Permanent item errors count towards MAX_ATTEMPTS; transient ones do not.
+ * - `onItemError` is called for every item failure (including a missing audio
+ *   file) so the caller can surface it per fileName.
  */
 export async function processQueue(
   transcribeFn: (uri: string, item: QueuedTranscription) => Promise<{ text: string }>,
   onItemSuccess?: (item: QueuedTranscription, transcript: string) => Promise<void>,
-  options: { ignoreCooldown?: boolean; skip?: (item: QueuedTranscription) => boolean } = {}
+  options: {
+    ignoreCooldown?: boolean;
+    skip?: (item: QueuedTranscription) => boolean;
+    onItemError?: (item: QueuedTranscription, err: unknown) => void;
+  } = {}
 ): Promise<QueueSummary> {
   if (draining) {
     return summaryNow({ processed: 0, failed: 0, permanentlyFailed: 0, deferred: 0, alreadyRunning: true });
   }
   if (!options.ignoreCooldown && Date.now() < configBlockedUntil) {
     const pending = (await readQueue()).filter((i) => !i.permanentlyFailed).length;
-    return summaryNow({ processed: 0, failed: 0, permanentlyFailed: 0, deferred: pending, alreadyRunning: false });
+    return {
+      ...(await summaryNow({ processed: 0, failed: 0, permanentlyFailed: 0, deferred: pending, alreadyRunning: false })),
+      stoppedBy: configBlockedKind,
+    };
   }
   draining = true;
   try {
@@ -301,6 +324,7 @@ export async function processQueue(
     let failed = 0;
     let permanentlyFailed = 0;
     let deferred = 0;
+    let stoppedBy: DrainStopReason | undefined;
 
     // Snapshot of fileNames only; every step re-reads the live entry by fileName.
     const fileNames = (await readQueue()).filter((i) => !i.permanentlyFailed).map((i) => i.fileName);
@@ -327,7 +351,6 @@ export async function processQueue(
       } catch {
         fileExists = false;
       }
-
       if (!fileExists) {
         logWarn('queue', `[queue] audio file missing, marking permanently failed: ${item.fileName}`);
         await updateItem(fileName, (q) => ({
@@ -336,6 +359,10 @@ export async function processQueue(
           nextAttemptAt: undefined,
           lastError: 'Arquivo de áudio não encontrado no dispositivo.',
         }));
+        options.onItemError?.(
+          item,
+          new TranscriptionError('bad_response', 'Arquivo de áudio não encontrado no dispositivo.', { code: 'file' })
+        );
         permanentlyFailed++;
         continue;
       }
@@ -354,14 +381,18 @@ export async function processQueue(
         } else {
           failed++;
         }
+        options.onItemError?.(item, err);
 
         const kind = isTranscriptionError(err) ? err.kind : undefined;
-        if (kind === 'invalid_key' || kind === 'forbidden') {
+        if (kind === 'invalid_key' || kind === 'forbidden' || kind === 'quota') {
           configBlockedUntil = Date.now() + CONFIG_BLOCK_MS;
+          configBlockedKind = kind;
+          stoppedBy = kind;
           logDebug('queue', `${kind} config error, stopping queue processing`);
           break;
         }
         if (kind === 'network' || kind === 'rate_limit') {
+          stoppedBy = kind;
           logDebug('queue', `${kind} error, stopping queue processing`);
           break;
         }
@@ -369,7 +400,7 @@ export async function processQueue(
       }
     }
 
-    return summaryNow({ processed, failed, permanentlyFailed, deferred, alreadyRunning: false });
+    return { ...(await summaryNow({ processed, failed, permanentlyFailed, deferred, alreadyRunning: false })), stoppedBy };
   } finally {
     draining = false;
   }
