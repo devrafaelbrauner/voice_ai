@@ -17,7 +17,11 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { buildCorsHeaders } from '../_shared/cors.ts';
-import { checkRateLimit, rateLimitHeaders } from '../_shared/rate-limit.ts';
+import {
+  checkRateLimit,
+  rateLimitHeaders,
+  rateLimitUnavailableResponse,
+} from '../_shared/rate-limit.ts';
 
 // Pricing — keep in sync with src/services/api_usage.ts on the client.
 const WHISPER_USD_PER_MINUTE = 0.006;
@@ -28,6 +32,11 @@ const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // 25 MB
 
 Deno.serve(async (req) => {
   const corsHeaders = buildCorsHeaders(req.headers.get('origin'));
+  const json = (status: number, body: unknown): Response =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
@@ -57,6 +66,7 @@ Deno.serve(async (req) => {
   );
   const rl = await checkRateLimit(serviceClient, userData.user.id, 'transcribe');
   if (!rl.allowed) {
+    if (rl.unavailable) return rateLimitUnavailableResponse(corsHeaders);
     return new Response(
       JSON.stringify({ error: 'Limite de transcrições atingido. Tente novamente em instantes.' }),
       {
@@ -70,11 +80,19 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Seg #2: validar tamanho do arquivo antes de repassar à OpenAI
-  const audioBytes = Number(req.headers.get('x-audio-bytes') ?? 0);
-  if (audioBytes > MAX_AUDIO_BYTES) {
+  // Seg #2: early rejection from declared sizes. Both headers are client-declared
+  // (HTTP framing is the only thing tying content-length to the real body, and a
+  // chunked upload has none), so enforce on the larger of the two here and rely
+  // on the counting stream below for the authoritative cap.
+  const contentLengthBytes = Number(req.headers.get('content-length')) || 0;
+  const xAudioBytes = Number(req.headers.get('x-audio-bytes')) || 0;
+  if (Math.max(contentLengthBytes, xAudioBytes) > MAX_AUDIO_BYTES) {
     return json(413, { error: `Audio file too large (max ${MAX_AUDIO_BYTES / 1024 / 1024} MB)` });
   }
+
+  // NOTE: the multipart `model` field cannot be validated without parsing the
+  // stream (which would buffer the audio). The OpenAI key is bound to Whisper
+  // cost only via the per-user rate limit + the size cap above.
 
   // Forward the multipart body straight to Whisper. We don't parse it — that
   // would force-load the entire audio file into memory.
@@ -87,6 +105,24 @@ Deno.serve(async (req) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
 
+  // Count bytes as they stream through (no buffering). Headers can be absent
+  // (chunked upload) or lie, so this is the authoritative enforcement: once the
+  // cumulative size exceeds the cap we error the stream and abort the upstream.
+  let countedBytes = 0;
+  let tooLarge = false;
+  const counter = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, streamCtrl) {
+      countedBytes += chunk.byteLength;
+      if (countedBytes > MAX_AUDIO_BYTES) {
+        tooLarge = true;
+        streamCtrl.error(new Error('audio upload exceeds size cap'));
+        controller.abort();
+        return;
+      }
+      streamCtrl.enqueue(chunk);
+    },
+  });
+
   let upstream: Response;
   try {
     upstream = await fetch(
@@ -97,7 +133,7 @@ Deno.serve(async (req) => {
           Authorization: `Bearer ${openaiKey}`,
           'Content-Type': contentType,
         },
-        body: req.body,
+        body: req.body ? req.body.pipeThrough(counter) : null,
         // @ts-ignore — Deno-specific, required when streaming a body through.
         duplex: 'half',
         signal: controller.signal,
@@ -105,12 +141,20 @@ Deno.serve(async (req) => {
     );
   } catch (err: any) {
     clearTimeout(timeoutId);
+    if (tooLarge) {
+      return json(413, { error: `Audio file too large (max ${MAX_AUDIO_BYTES / 1024 / 1024} MB)` });
+    }
     if (err?.name === 'AbortError') {
       return json(504, { error: 'OpenAI transcription timed out. Try again.' });
     }
-    return json(502, { error: `Upstream error: ${err?.message ?? String(err)}` });
+    // AS-10: log the real error server-side only; keep the client body generic.
+    console.error('[openai-transcribe] upstream fetch failed:', err);
+    return json(502, { error: 'Erro no serviço de transcrição. Tente novamente em instantes.' });
   } finally {
     clearTimeout(timeoutId);
+  }
+  if (tooLarge) {
+    return json(413, { error: `Audio file too large (max ${MAX_AUDIO_BYTES / 1024 / 1024} MB)` });
   }
 
   if (!upstream.ok) {
@@ -128,9 +172,12 @@ Deno.serve(async (req) => {
   const result = await upstream.json();
 
   // Best-effort cost estimate. Whisper response doesn't include duration in
-  // the default json format, so we approximate from the file size header.
-  const contentLength = Number(req.headers.get('x-audio-bytes') ?? 0);
-  const audioSeconds = contentLength > 0 ? Math.max(1, contentLength / 16000) : 0;
+  // the default json format, so we approximate from the upload size: actual
+  // counted bytes first, then the declared headers as fallback.
+  const sizeForCost = countedBytes > 0
+    ? countedBytes
+    : contentLengthBytes > 0 ? contentLengthBytes : xAudioBytes;
+  const audioSeconds = sizeForCost > 0 ? Math.max(1, sizeForCost / 16000) : 0;
   const costUSD = (audioSeconds / 60) * WHISPER_USD_PER_MINUTE;
 
   return new Response(
@@ -149,10 +196,3 @@ Deno.serve(async (req) => {
     }
   );
 });
-
-function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  });
-}
