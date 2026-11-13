@@ -49,6 +49,7 @@ import {
   getAllRecordingsMeta,
   deleteRecordingMeta,
   setField,
+  updateFieldIfExists,
   clearField,
 } from '../services/db';
 import {
@@ -321,7 +322,8 @@ export default function RecordingsScreen() {
       const result = await useProcessingStore
         .getState()
         .drainOfflineQueue(manual ? { ignoreCooldown: true } : undefined);
-      setLastDrainStop(result.stoppedBy ?? null);
+      // already_running = outro drain (AppState/foco) está em curso; não é um estado a exibir.
+      if (result.stoppedBy !== 'already_running') setLastDrainStop(result.stoppedBy ?? null);
       if (manual || result.processed > 0) {
         Alert.alert(
           result.stoppedBy && ACTION_REQUIRED[result.stoppedBy]
@@ -634,7 +636,14 @@ export default function RecordingsScreen() {
         )
       );
     } else {
-      await setField(item.fileName, 'customName', trimmed);
+      const saved = await setField(item.fileName, 'customName', trimmed);
+      if (!saved) {
+        // Tombstone: a gravação foi excluída (ex.: por sync); nada foi gravado.
+        cancelEdit();
+        Alert.alert('Gravação indisponível', 'Esta gravação foi excluída; o nome não foi salvo.');
+        void loadRecordings();
+        return;
+      }
       setRecordings((prev) =>
         prev.map((r) =>
           r.fileName === item.fileName ? { ...r, customName: trimmed } : r
@@ -836,7 +845,14 @@ export default function RecordingsScreen() {
     }
 
     try {
-      await setField(item.fileName, 'transcript', trimmed);
+      // Só-UPDATE: se a gravação foi excluída durante a edição, nada é recriado.
+      const saved = await updateFieldIfExists(item.fileName, 'transcript', trimmed);
+      if (!saved) {
+        closeEditTranscriptModal();
+        Alert.alert('Gravação indisponível', 'Esta gravação foi excluída; a transcrição editada não foi salva.');
+        void loadRecordings();
+        return;
+      }
       setRecordings((prev) =>
         prev.map((r) =>
           r.fileName === item.fileName ? { ...r, transcript: trimmed } : r

@@ -680,6 +680,49 @@ export async function setField(
   return true;
 }
 
+/**
+ * Variante só-UPDATE de setField, para tudo que NÃO é a primeira gravação do registro
+ * (resumo, templateId, patientName, edição de transcrição). Só grava se a linha ainda
+ * existe E não há tombstone: se a gravação foi excluída durante um processamento em voo
+ * (o tombstone some depois que o sync confirma a exclusão), nada é recriado — sem
+ * linha-fantasma com PHI e sem reenvio ao Supabase. Atômico (um único UPDATE).
+ * Retorna false quando nada foi gravado.
+ */
+export async function updateFieldIfExists(
+  fileName: string,
+  field: Field,
+  value: string
+): Promise<boolean> {
+  const db = await getDb();
+  const now = new Date().toISOString();
+  const valueToStore = SENSITIVE_FIELDS.includes(field) ? await encrypt(value) : value;
+  const res = await db.runAsync(
+    `UPDATE recordings SET ${field} = ?, updatedAt = ?
+     WHERE fileName = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM pending_deletions WHERE kind = 'recording' AND key = ?
+       )`,
+    [valueToStore, now, fileName, fileName]
+  );
+  if (res.changes === 0) return false;
+  notifyChange();
+  return true;
+}
+
+/** A linha da gravação existe e não há tombstone dela? (para abortar trabalho em voo) */
+export async function recordingRowLive(fileName: string): Promise<boolean> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ one: number }>(
+    `SELECT 1 AS one FROM recordings r
+      WHERE r.fileName = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM pending_deletions p WHERE p.kind = 'recording' AND p.key = r.fileName
+        )`,
+    [fileName]
+  );
+  return row != null;
+}
+
 export async function clearField(
   fileName: string,
   field: Field

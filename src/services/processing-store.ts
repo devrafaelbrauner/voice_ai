@@ -34,7 +34,7 @@ import {
   isTranscriptionError,
   type TranscriptionErrorKind,
 } from './openai';
-import { setField, extractPatientName, getPendingDeletions } from './db';
+import { setField, updateFieldIfExists, recordingRowLive, extractPatientName, getPendingDeletions } from './db';
 import {
   enqueueTranscription,
   dequeueTranscription,
@@ -97,6 +97,18 @@ export interface DrainOptions {
   ignoreCooldown?: boolean;
 }
 
+/** Intervalo de checagem de existência da gravação durante o processamento com IA. */
+const LIVENESS_POLL_MS = 2_000;
+
+/** A gravação foi excluída enquanto o processamento com IA estava em voo. */
+class RecordingGoneError extends Error {
+  constructor() {
+    super('Gravação excluída durante o processamento.');
+    this.name = 'RecordingGoneError';
+    Object.setPrototypeOf(this, RecordingGoneError.prototype);
+  }
+}
+
 /** Intervalo mínimo entre drenagens automáticas da fila (anti re-drain, C3-05). */
 const MIN_DRAIN_INTERVAL_MS = 5_000;
 
@@ -133,7 +145,13 @@ async function saveTranscriptAndCleanup(
     await dequeueTranscription(fileName);
     return 'discarded';
   }
-  await setField(fileName, 'transcript', text);
+  const wrote = await setField(fileName, 'transcript', text);
+  if (!wrote) {
+    // Tombstone apareceu entre a checagem e a escrita: nada gravado, áudio intocado.
+    logWarn('processing-store.discard', 'setField refused (tombstone); transcript discarded');
+    await dequeueTranscription(fileName);
+    return 'discarded';
+  }
   await dequeueTranscription(fileName);
   try {
     const info = await FileSystem.getInfoAsync(uri);
@@ -387,7 +405,19 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
 
     void (async () => {
       let accumulated = '';
+      // A gravação pode ser excluída durante o streaming (dezenas de s). O tombstone
+      // some depois que o sync confirma, então nada impede o setField tardio de
+      // recriar a linha (PHI): vigiamos a existência e só gravamos via UPDATE.
+      let gone = false;
+      const watch = setInterval(() => {
+        recordingRowLive(item.fileName)
+          .then((live) => {
+            if (!live) gone = true;
+          })
+          .catch((e) => logWarn('processing-store.liveness', e));
+      }, LIVENESS_POLL_MS);
       try {
+        if (!(await recordingRowLive(item.fileName))) throw new RecordingGoneError();
         // summarizeTextStream emite chunks em tempo real.
         // Para modelos sem suporte a streaming (proxy / reasoning), emite o
         // texto completo num único chunk — a UI se comporta da mesma forma.
@@ -395,6 +425,8 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
           item.transcript,
           templateId,
           (chunk) => {
+            // Lançar aqui aborta o stream (summarizeTextStream repropaga após o 1º chunk).
+            if (gone) throw new RecordingGoneError();
             accumulated += chunk;
             set((s) => ({
               streamingContent: {
@@ -410,19 +442,28 @@ export const useProcessingStore = create<ProcessingState>((set, get) => ({
           throw new Error('O modelo retornou uma resposta vazia. Tente novamente.');
         }
 
-        await setField(item.fileName, 'summary', accumulated);
-        await setField(item.fileName, 'templateId', templateId);
+        // Só-UPDATE (sem linha ou com tombstone ⇒ false): nunca ressuscita a gravação.
+        if (!(await updateFieldIfExists(item.fileName, 'summary', accumulated))) {
+          throw new RecordingGoneError();
+        }
+        await updateFieldIfExists(item.fileName, 'templateId', templateId);
         const patientName = extractPatientName(accumulated);
         if (patientName) {
-          await setField(item.fileName, 'patientName', patientName);
+          await updateFieldIfExists(item.fileName, 'patientName', patientName);
         }
       } catch (err: unknown) {
-        logError('processing-store.process', err);
-        Alert.alert(
-          'Erro no processamento',
-          err instanceof Error ? err.message : String(err)
-        );
+        if (err instanceof RecordingGoneError) {
+          // Excluída durante o processamento: resultado descartado, sem alerta.
+          logWarn('processing-store.process', 'recording deleted during processing; result discarded');
+        } else {
+          logError('processing-store.process', err);
+          Alert.alert(
+            'Erro no processamento',
+            err instanceof Error ? err.message : String(err)
+          );
+        }
       } finally {
+        clearInterval(watch);
         set((s) => {
           // Remove a entrada de streaming independentemente do resultado
           const { [item.fileName]: _removed, ...restStreaming } = s.streamingContent;
