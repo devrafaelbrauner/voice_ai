@@ -2,6 +2,15 @@
 
 ## [Não lançado]
 
+### Segurança (mobile)
+- Criptografia local agora é AES-256-GCM real (`@noble/ciphers` + `expo-crypto`): o runtime Hermes não tem `crypto.subtle`, então antes os dados sensíveis eram gravados em texto puro. `encrypt()` falha fechado; chave criada com single-flight; `KeyLostError` em vez de regenerar chave silenciosamente. Verificado em aparelho (campo sensível gravado como `enc1:`, 0 ocorrências de texto puro no SQLite).
+- Migration v9 recifra linhas legadas em texto puro; `secure_delete` + VACUUM após migração; push de sync cifra campos sensíveis e aborta se falhar.
+- Backup nunca mais cai para exportação sem cifra.
+- Bird ID: chaves do SecureStore inválidas corrigidas; PDF só é compartilhado se tiver assinatura real (`/ByteRange` + `/Contents`).
+- EvoPad: checagem de rede local estrita (`10.evil.com` não passa), URL guardada só como origem, sem fallback para localhost quando a URL configurada é remota.
+- Mermaid: escape de `</script>`, script fixado em 10.9.8 com SRI, CSP com nonce, navegação bloqueada, sem janelas extras.
+- **Requer novo binário nativo** (`expo-crypto`); não há OTA.
+
 ### Corrigido
 - Edge Functions `openai-chat` e `openai-transcribe`: `json()` referenciava `corsHeaders` fora de escopo (ReferenceError em toda resposta de erro).
 - `gpt-5.4-mini` aceito no proxy (`max_completion_tokens`, sem `temperature`); custo reportado 0 até o preço ser confirmado.
