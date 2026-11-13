@@ -8,7 +8,8 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "lint": "eslint src scripts"
+    "lint": "eslint src scripts",
+    "test": "jest"
   },
   "dependencies": {
     "@noble/ciphers": "2.4.0",
@@ -62,13 +63,19 @@
     "zustand": "^5.0.13"
   },
   "devDependencies": {
+    "@types/jest": "29.5.14",
     "@types/react": "~19.2.2",
     "babel-preset-expo": "^55.0.22",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~55.0.1",
+    "jest": "~29.7.0",
+    "jest-expo": "~55.0.22",
     "typescript": "~5.9.2"
   },
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "overrides": {
     "expo-asset": "~55.0.17"
   }
