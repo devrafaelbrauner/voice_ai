@@ -29,6 +29,20 @@ interface RateLimitResult {
   allowed: boolean;
   remaining: number;
   resetAt: string;
+  /** true quando o backend do limiter falhou (fail-closed): responder 503, não 429. */
+  unavailable?: boolean;
+}
+
+function unavailableResult(windowEnd: Date): RateLimitResult {
+  return { allowed: false, remaining: 0, resetAt: windowEnd.toISOString(), unavailable: true };
+}
+
+/** Resposta padrão 503 para quando o rate limiter está indisponível. */
+export function rateLimitUnavailableResponse(corsHeaders: Record<string, string>): Response {
+  return new Response(JSON.stringify({ error: 'Serviço temporariamente indisponível' }), {
+    status: 503,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': '5' },
+  });
 }
 
 /**
@@ -67,12 +81,18 @@ export async function checkRateLimit(
     });
 
     if (error) {
-      // fail-open: melhor deixar passar do que bloquear usuários legítimos por falha de DB
-      console.warn('[rate-limit] RPC error, fail-open:', error.message);
-      return { allowed: true, remaining: config.maxRequests, resetAt: windowEnd.toISOString() };
+      // fail-closed (B4): sem contador confiável, não deixamos passar tráfego
+      // que gera custo na OpenAI. Chamadores devem responder 503.
+      console.error('[rate-limit] RPC error, fail-closed:', error.message);
+      return unavailableResult(windowEnd);
     }
 
-    const currentCount: number = typeof newCount === 'number' ? newCount : 1;
+    if (typeof newCount !== 'number' || !Number.isFinite(newCount)) {
+      // fail-closed: RPC sem erro mas sem contador numérico (função/migração incorreta).
+      console.error('[rate-limit] RPC returned non-numeric count, fail-closed:', newCount);
+      return unavailableResult(windowEnd);
+    }
+    const currentCount: number = newCount;
 
     // 2. Verificar cap horário: somar todos os contadores da hora atual
     const { data: hourRows, error: hourErr } = await client
@@ -83,9 +103,15 @@ export async function checkRateLimit(
       .gte('window_start', hourStart.toISOString())
       .lt('window_start', hourEnd.toISOString());
 
-    const hourTotal: number = hourErr
-      ? currentCount // se falhar, usa apenas o count atual (conservador)
-      : (hourRows ?? []).reduce((sum: number, row: { count: number }) => sum + (row.count ?? 0), 0);
+    if (hourErr) {
+      // fail-closed: sem o total horário não dá para aplicar o cap absoluto.
+      console.error('[rate-limit] hourly select error, fail-closed:', hourErr.message);
+      return unavailableResult(windowEnd);
+    }
+    const hourTotal: number = (hourRows ?? []).reduce(
+      (sum: number, row: { count: number }) => sum + (row.count ?? 0),
+      0
+    );
 
     const withinMinute = currentCount <= config.maxRequests;
     const withinHour   = hourTotal   <= config.maxPerHour;
@@ -110,9 +136,9 @@ export async function checkRateLimit(
 
     return { allowed, remaining, resetAt };
   } catch (err) {
-    // fail-open
-    console.warn('[rate-limit] unexpected error, fail-open:', err);
-    return { allowed: true, remaining: config.maxRequests, resetAt: windowEnd.toISOString() };
+    // fail-closed (B4)
+    console.error('[rate-limit] unexpected error, fail-closed:', err);
+    return unavailableResult(windowEnd);
   }
 }
 
