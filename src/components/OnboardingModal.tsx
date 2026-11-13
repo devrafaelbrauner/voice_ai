@@ -13,7 +13,6 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   Modal,
   Pressable,
-  ScrollView,
   StyleSheet,
   View,
   Animated,

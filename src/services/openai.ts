@@ -15,7 +15,6 @@ import { secureFetch } from './secure-fetch';
 import {
   WHISPER_MEDICAL_PROMPT,
   isReasoningModel,
-  needsCompletionTokens,
   buildChatBody,
 } from './openai-shared';
 
@@ -341,6 +340,7 @@ export function parseRetryAfter(value: string | null | undefined, now = Date.now
   if (!value) return undefined;
   const v = value.trim();
   if (/^\d+$/.test(v)) return Math.min(Number(v) * 1000, MAX_RETRY_AFTER_MS);
+  if (!/[a-z]/i.test(v)) return undefined; // data HTTP tem letras; '1.5' e '-5' não são válidos
   const at = Date.parse(v);
   if (Number.isNaN(at)) return undefined;
   return Math.min(Math.max(0, at - now), MAX_RETRY_AFTER_MS);

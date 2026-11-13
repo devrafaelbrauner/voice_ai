@@ -181,10 +181,15 @@ describe('classificação de erros HTTP', () => {
     expect(classifyHttpError(503, '3').retryAfterMs).toBe(3_000);
   });
 
-  // BUG (slice-d/bugs.md #1): Date.parse('1.5') e Date.parse('-5') "funcionam" no V8 e viram datas
-  // de 2001 → espera de 0 ms (retry imediato, sem backoff) em vez de "cabeçalho inválido".
-  test.failing.each(['1.5', '-5'])('Retry-After não padrão (%s) deve ser ignorado, não virar espera de 0 ms', (value) => {
+  // Date.parse('1.5') e Date.parse('-5') "funcionam" no V8 e viravam datas de 2001 → espera de 0 ms.
+  test.each(['1.5', '-5'])('Retry-After não padrão (%s) é ignorado, não vira espera de 0 ms', (value) => {
     expect(parseRetryAfter(value, Date.parse('2025-06-01T12:00:00.000Z'))).toBeUndefined();
+  });
+
+  test('Retry-After: "0" vale 0 ms e data HTTP futura vale a diferença', () => {
+    const now = Date.parse('2025-06-01T12:00:00.000Z');
+    expect(parseRetryAfter('0', now)).toBe(0);
+    expect(parseRetryAfter('Sun, 01 Jun 2025 12:00:30 GMT', now)).toBe(30_000);
   });
 
   test.each([400, 401, 403, 429, 500, 503])('HTTP %i: corpo do provedor com chave/Bearer nunca vaza para a mensagem', (status) => {

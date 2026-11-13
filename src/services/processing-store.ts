@@ -29,7 +29,6 @@ import { Alert, AppState } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
   transcribeAudio,
-  summarizeText,
   summarizeTextStream,
   isTranscriptionError,
   type TranscriptionErrorKind,
