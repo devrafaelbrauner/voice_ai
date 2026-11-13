@@ -26,18 +26,6 @@ import {
 import { getDoctorProfile, type DoctorProfile } from './doctor';
 import { encrypt } from './db-crypto';
 
-function isCryptoAvailable(): boolean {
-  try {
-    return (
-      typeof globalThis !== 'undefined' &&
-      typeof (globalThis as any).crypto !== 'undefined' &&
-      typeof (globalThis as any).crypto.subtle !== 'undefined'
-    );
-  } catch {
-    return false;
-  }
-}
-
 const BACKUP_VERSION = 1;
 
 /**
@@ -129,7 +117,7 @@ export async function buildBackup(): Promise<BackupPayload> {
  *
  * The file is an EncryptedBackupEnvelope: non-sensitive stats are readable,
  * while recordings/templates/doctor data is encrypted with the device's AES key.
- * If crypto.subtle is unavailable (rare), falls back to unencrypted export with a warning.
+ * If encryption fails the export is aborted (never falls back to plaintext).
  */
 export async function exportBackup(): Promise<void> {
   try {
@@ -148,55 +136,27 @@ export async function exportBackup(): Promise<void> {
       throw new Error('Diretório de cache indisponível');
     }
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const encrypted = isCryptoAvailable();
 
-    let fileContent: string;
-    let fileName: string;
-    let mimeType: string;
-    let uti: string;
-    let dialogSuffix: string;
+    // Encrypt only the sensitive part of the payload. encrypt() fails closed:
+    // if it throws, the export aborts with the error handling below.
+    const sensitiveData = {
+      doctor: payload.doctor,
+      recordings: payload.recordings,
+      customTemplates: payload.customTemplates,
+    };
+    const encryptedData = await encrypt(JSON.stringify(sensitiveData));
 
-    if (encrypted) {
-      // Encrypt only the sensitive part of the payload
-      const sensitiveData = {
-        doctor: payload.doctor,
-        recordings: payload.recordings,
-        customTemplates: payload.customTemplates,
-      };
-      const encryptedData = await encrypt(JSON.stringify(sensitiveData));
-
-      const envelope: EncryptedBackupEnvelope = {
-        _voiceai: 'encrypted-backup-v1',
-        exportedAt: payload.exportedAt,
-        stats: payload.stats,
-        data: encryptedData,
-      };
-      fileContent = JSON.stringify(envelope, null, 2);
-      fileName = `voice-ai-recorder-backup-${stamp}.enc.json`;
-      mimeType = 'application/json';
-      uti = 'public.json';
-      dialogSuffix = ' (cifrado AES-256)';
-    } else {
-      // Seg #5: confirmação explícita do médico antes de exportar PHI sem cifração
-      const confirmed = await new Promise<boolean>((resolve) => {
-        Alert.alert(
-          'Exportar sem cifração',
-          'A criptografia AES-256 não está disponível neste dispositivo. O backup será exportado em texto puro, podendo conter dados sensíveis de pacientes (PHI).\n\nDeseja continuar mesmo assim?',
-          [
-            { text: 'Cancelar', style: 'cancel', onPress: () => resolve(false) },
-            { text: 'Exportar mesmo assim', style: 'destructive', onPress: () => resolve(true) },
-          ]
-        );
-      });
-      if (!confirmed) return;
-
-      // Fallback: export plain JSON with a warning
-      fileContent = JSON.stringify(payload, null, 2);
-      fileName = `voice-ai-recorder-backup-${stamp}.json`;
-      mimeType = 'application/json';
-      uti = 'public.json';
-      dialogSuffix = ' ⚠️ sem cifração';
-    }
+    const envelope: EncryptedBackupEnvelope = {
+      _voiceai: 'encrypted-backup-v1',
+      exportedAt: payload.exportedAt,
+      stats: payload.stats,
+      data: encryptedData,
+    };
+    const fileContent = JSON.stringify(envelope, null, 2);
+    const fileName = `voice-ai-recorder-backup-${stamp}.enc.json`;
+    const mimeType = 'application/json';
+    const uti = 'public.json';
+    const dialogSuffix = ' (cifrado AES-256)';
 
     const path = `${dir}${fileName}`;
     await FileSystem.writeAsStringAsync(path, fileContent, {
@@ -211,7 +171,7 @@ export async function exportBackup(): Promise<void> {
       });
     } else {
       Alert.alert(
-        encrypted ? 'Backup cifrado gerado' : 'Backup gerado (sem cifração)',
+        'Backup cifrado gerado',
         `Arquivo salvo em:\n${path}\n\nNenhum app de compartilhamento disponível.`
       );
     }
