@@ -1,8 +1,9 @@
-import { Linking, Share, Alert } from 'react-native';
+import { Linking, Share, Alert, AppState } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { showActionSheet } from '../components/ActionSheet';
+import { Directory, File, Paths } from 'expo-file-system';
 
 // ─── Text share menu ────────────────────────────────────────────────────────
 
@@ -59,6 +60,73 @@ export function openShareMenu(text: string, title: string, onCopied?: () => void
   );
 }
 
+// ─── Export files (cache/exports) ───────────────────────────────────────────
+//
+// Todo arquivo gerado para compartilhar (Markdown com PHI em texto puro, backups
+// cifrados) vive em cache/exports/<token>/<nome>. Cada export ganha um subdiretório
+// próprio (token = timestamp em base36 + sufixo aleatório): o nome visível do arquivo
+// é preservado e nunca colide. O sweep apaga por idade, lida do token.
+
+const EXPORTS_DIR = 'exports';
+/** Janela para o app destino ler o arquivo compartilhado antes do sweep apagar. */
+const EXPORT_MAX_AGE_MS = 15 * 60 * 1000;
+
+/** Cria (vazio) o arquivo de export e devolve o handle; o chamador grava o conteúdo. */
+export function createExportFile(fileName: string): File {
+  const root = new Directory(Paths.cache, EXPORTS_DIR);
+  root.create({ intermediates: true, idempotent: true });
+  const token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = new Directory(root, token);
+  dir.create({ intermediates: true });
+  const file = new File(dir, fileName);
+  file.create();
+  return file;
+}
+
+/**
+ * Apaga exports antigos (e restos de versões anteriores que gravavam na raiz do cache).
+ * Best-effort: nunca lança. Chamado ao abrir Config/Gravações e em AppState 'active'.
+ */
+export async function sweepOldExports(maxAgeMs: number = EXPORT_MAX_AGE_MS): Promise<void> {
+  const cutoff = Date.now() - maxAgeMs;
+  try {
+    const root = new Directory(Paths.cache, EXPORTS_DIR);
+    if (root.exists) {
+      for (const entry of root.list()) {
+        if (!(entry instanceof Directory)) {
+          entry.delete(); // arquivo solto: não é criado por createExportFile
+          continue;
+        }
+        const ts = parseInt(entry.name.split('-')[0], 36);
+        if (!Number.isFinite(ts) || ts < cutoff) entry.delete();
+      }
+    }
+  } catch {
+    // sweep é oportunista
+  }
+  try {
+    // Legado: versões anteriores gravavam .md e backups direto na raiz do cache.
+    const base = FileSystem.cacheDirectory;
+    if (!base) return;
+    for (const name of await FileSystem.readDirectoryAsync(base)) {
+      if (!/\.md$|^voice-ai-recorder-backup-.*\.enc\.json$/.test(name)) continue;
+      const info = await FileSystem.getInfoAsync(`${base}${name}`);
+      if (info.exists && !info.isDirectory && info.modificationTime * 1000 < cutoff) {
+        await FileSystem.deleteAsync(`${base}${name}`, { idempotent: true });
+      }
+    }
+  } catch {
+    // idem
+  }
+}
+
+// Único gatilho de sweep em segundo plano: ao voltar ao primeiro plano (o app destino já
+// leu o arquivo). Markdown com PHI não fica no cache até o usuário abrir Config/Gravações.
+// Registrado uma vez no carregamento do módulo (como os demais listeners de serviço).
+AppState.addEventListener('change', (state) => {
+  if (state === 'active') void sweepOldExports();
+});
+
 // ─── Markdown (.md) file export ─────────────────────────────────────────────
 
 export interface MarkdownExportInput {
@@ -112,11 +180,10 @@ export async function exportToMarkdown(input: MarkdownExportInput): Promise<void
       .replace(/\s+/g, '_');
 
     const fileName = `${safeName || 'transcricao'}.md`;
-    const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
+    const file = createExportFile(fileName);
+    const fileUri = file.uri;
 
-    await FileSystem.writeAsStringAsync(fileUri, md, {
-      encoding: FileSystem.EncodingType.UTF8,
-    });
+    file.write(md);
 
     const isAvailable = await Sharing.isAvailableAsync();
     if (isAvailable) {
