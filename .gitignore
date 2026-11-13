@@ -53,3 +53,6 @@ android/app/*.keystore
 # Supabase CLI local state
 supabase/.temp/
 .nexus/
+
+# Jest
+coverage/
