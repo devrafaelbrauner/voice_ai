@@ -1577,7 +1577,7 @@ export default function RecordingsScreen() {
 
                     <YStack f={1}>
                       {/* Patient chip */}
-                      {item.patientName && !isEditing && (
+                      {item.patientName && (
                         <XStack
                           bg={c.bgBlueSoft}
                           px="$2"
@@ -1592,58 +1592,16 @@ export default function RecordingsScreen() {
                         </XStack>
                       )}
 
-                      {isEditing ? (
-                        <XStack alignItems="center" gap="$2">
-                          <TextInput
-                            value={editValue}
-                            onChangeText={setEditValue}
-                            autoFocus
-                            placeholder="Nome da gravação"
-                            style={{
-                              flex: 1,
-                              borderWidth: 1,
-                              borderColor: c.primary,
-                              borderRadius: 6,
-                              paddingHorizontal: 8,
-                              paddingVertical: 6,
-                              fontSize: 14,
-                              backgroundColor: c.bgInput,
-                              color: c.text,
-                            }}
-                            onSubmitEditing={() => saveEdit(item)}
-                            returnKeyType="done"
-                            accessibilityLabel="Nome da gravação"
-                            accessibilityHint="Digite o novo nome para esta gravação"
-                          />
-                          <Pressable
-                            style={swipeStyles.iconTouch}
-                            onPress={() => saveEdit(item)}
-                            accessibilityRole="button"
-                            accessibilityLabel="Salvar nome"
-                          >
-                            <Check size={22} color={c.primary} />
-                          </Pressable>
-                          <Pressable
-                            style={swipeStyles.iconTouch}
-                            onPress={cancelEdit}
-                            accessibilityRole="button"
-                            accessibilityLabel="Cancelar renomeação"
-                          >
-                            <X size={22} color={c.accentRed} />
-                          </Pressable>
-                        </XStack>
-                      ) : (
-                        <XStack alignItems="center" gap="$2">
-                          <Text
-                            fontWeight="700"
-                            fontSize={14}
-                            f={1}
-                            numberOfLines={1}
-                          >
-                            {displayName}
-                          </Text>
-                        </XStack>
-                      )}
+                      <XStack alignItems="center" gap="$2">
+                        <Text
+                          fontWeight="700"
+                          fontSize={14}
+                          f={1}
+                          numberOfLines={1}
+                        >
+                          {displayName}
+                        </Text>
+                      </XStack>
                       <Text color={c.textMuted} fontSize={12} mt="$1">
                         {formatDate(item.createdAt)}
                         {item.durationSecs
@@ -1705,6 +1663,52 @@ export default function RecordingsScreen() {
                       <MoreHorizontal size={24} color={c.textSecondary} />
                     </Pressable>
                   </XStack>
+
+                  {/* Edição do nome em linha PRÓPRIA (largura total do cartão): na mesma linha de
+                      play + chip + ⋯ + ✓ + ✕ o campo sobrava com ~47 dp em telas de ~320 dp. */}
+                  {isEditing && (
+                    <XStack alignItems="center" gap="$2">
+                      <TextInput
+                        value={editValue}
+                        onChangeText={setEditValue}
+                        autoFocus
+                        placeholder="Nome da gravação"
+                        style={{
+                          flex: 1,
+                          minWidth: 120,
+                          minHeight: 48,
+                          borderWidth: 1,
+                          borderColor: c.primary,
+                          borderRadius: 6,
+                          paddingHorizontal: 8,
+                          paddingVertical: 6,
+                          fontSize: 14,
+                          backgroundColor: c.bgInput,
+                          color: c.text,
+                        }}
+                        onSubmitEditing={() => saveEdit(item)}
+                        returnKeyType="done"
+                        accessibilityLabel="Nome da gravação"
+                        accessibilityHint="Digite o novo nome para esta gravação"
+                      />
+                      <Pressable
+                        style={swipeStyles.iconTouch}
+                        onPress={() => saveEdit(item)}
+                        accessibilityRole="button"
+                        accessibilityLabel="Salvar nome"
+                      >
+                        <Check size={22} color={c.primary} />
+                      </Pressable>
+                      <Pressable
+                        style={swipeStyles.iconTouch}
+                        onPress={cancelEdit}
+                        accessibilityRole="button"
+                        accessibilityLabel="Cancelar renomeação"
+                      >
+                        <X size={22} color={c.accentRed} />
+                      </Pressable>
+                    </XStack>
+                  )}
 
                   {/* Template badge — shown when a summary exists */}
                   {item.summary && item.templateId && (

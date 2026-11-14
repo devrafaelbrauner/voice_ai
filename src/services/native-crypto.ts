@@ -8,10 +8,11 @@
 
 import type * as QuickCryptoModule from 'react-native-quick-crypto';
 import type * as QuickBase64Module from 'react-native-quick-base64';
+import { logWarn } from './log';
 
 export type NativeCrypto = Pick<
   typeof QuickCryptoModule,
-  'scrypt' | 'createCipheriv' | 'createDecipheriv' | 'Buffer'
+  'scrypt' | 'createCipheriv' | 'createDecipheriv' | 'Buffer' | 'bufferToString' | 'stringToBuffer' | 'timingSafeEqual'
 > &
   Pick<typeof QuickBase64Module, 'toByteArray' | 'fromByteArray'>;
 
@@ -37,11 +38,19 @@ export function loadNativeCrypto(): NativeCrypto {
       createCipheriv: qc.createCipheriv,
       createDecipheriv: qc.createDecipheriv,
       Buffer: qc.Buffer,
+      bufferToString: qc.bufferToString,
+      stringToBuffer: qc.stringToBuffer,
+      timingSafeEqual: qc.timingSafeEqual,
       toByteArray: b64.toByteArray,
       fromByteArray: b64.fromByteArray,
     };
+    // Sonda do conversor UTF-8 nativo (Utils do quick-crypto): falha aqui, e não no meio de uma restauração.
+    decodeUtf8Strict(nativeCrypto, new Uint8Array([0x61, 0xc3, 0xa9]));
     return nativeCrypto;
-  } catch {
+  } catch (err) {
+    nativeCrypto = null;
+    // Só o nome do erro (a mensagem pode ecoar caminhos/dados); sem isso o diagnóstico some.
+    logWarn('native-crypto', `módulo nativo indisponível (${err instanceof Error ? err.name : typeof err}).`);
     throw new Error(
       'A criptografia nativa não está disponível neste aplicativo. Instale a versão mais recente do app (é preciso um novo build nativo com react-native-quick-crypto).'
     );
@@ -91,4 +100,45 @@ export function gcmDecrypt(
   plain.set(body, 0);
   plain.set(rest, body.length);
   return plain;
+}
+
+const UTF8_DECODE_CHUNK = 1 << 20;
+
+const invalidUtf8 = () => new Error('UTF-8 inválido');
+
+/** Um pedaço [from, to) de `buf`: decodifica no nativo e confere por ida e volta (ver decodeUtf8Strict). */
+function decodeUtf8Piece(n: NativeCrypto, buf: ArrayBuffer, from: number, to: number): string {
+  const text = n.bufferToString(buf, 'utf8', from, to);
+  const back = new Uint8Array(n.stringToBuffer(text, 'utf8'));
+  if (back.length !== to - from || !n.timingSafeEqual(back, new Uint8Array(buf, from, to - from))) throw invalidUtf8();
+  return text;
+}
+
+/**
+ * bytes UTF-8 -> string SEM o TextDecoder do Expo (polyfill em JS: ~1,6 ms por campo de 4,5 KB no
+ * Hermes). Usa o conversor nativo do quick-crypto (`bufferToString`, JSI/C++), que é permissivo:
+ * troca bytes inválidos por U+FFFD. Para manter a validação ESTRITA (`fatal`), recodifica a string
+ * no nativo e exige bytes idênticos aos de entrada: o recodificador só emite UTF-8 bem formado
+ * (surrogate solto vira U+FFFD), então bytes inválidos, sobrepostos (overlong), surrogates em UTF-8
+ * e truncados nunca voltam iguais. Texto válido volta idêntico (inclusive U+FFFD legítimo e BOM:
+ * ao contrário do TextDecoder, o BOM inicial NÃO é descartado). Lança Error se inválido.
+ * Em pedaços de ~1 MB cortados em fronteira de caractere: a conferência não precisa de um
+ * segundo buffer do tamanho do backup inteiro.
+ */
+export function decodeUtf8Strict(n: NativeCrypto, bytes: Uint8Array): string {
+  if (bytes.length === 0) return '';
+  const buf = bytes.buffer as ArrayBuffer;
+  const base = bytes.byteOffset;
+  const total = bytes.length;
+  if (total <= UTF8_DECODE_CHUNK) return decodeUtf8Piece(n, buf, base, base + total);
+  const parts: string[] = [];
+  let start = 0;
+  while (start < total) {
+    let end = Math.min(start + UTF8_DECODE_CHUNK, total);
+    // Não corta no meio de uma sequência multibyte (continuação = 10xxxxxx; no máximo 3 bytes).
+    for (let back = 0; end < total && back < 3 && (bytes[end] & 0xc0) === 0x80; back++) end--;
+    parts.push(decodeUtf8Piece(n, buf, base + start, base + end));
+    start = end;
+  }
+  return parts.join('');
 }

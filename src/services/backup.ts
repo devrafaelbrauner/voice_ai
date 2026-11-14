@@ -24,7 +24,15 @@ import * as Sharing from 'expo-sharing';
 import * as DocumentPicker from 'expo-document-picker';
 import { File, Paths } from 'expo-file-system';
 import { getRandomValues } from 'expo-crypto';
-import { loadNativeCrypto, asBytes, gcmEncrypt, gcmDecrypt, GCM_TAG_BYTES, type NativeCrypto } from './native-crypto';
+import {
+  loadNativeCrypto,
+  asBytes,
+  gcmEncrypt,
+  gcmDecrypt,
+  decodeUtf8Strict,
+  GCM_TAG_BYTES,
+  type NativeCrypto,
+} from './native-crypto';
 import type { SQLiteDatabase } from 'expo-sqlite';
 import {
   getDb,
@@ -162,24 +170,10 @@ function base64ToBytes(n: NativeCrypto, b64: string): Uint8Array {
   }
 }
 
-const UTF8_DECODE_CHUNK = 1 << 20;
-
-/** Decodifica UTF-8 em pedaços de ~1 MB cortados em fronteira de caractere (sem depender de `stream`). */
-function decodeUtf8Chunked(bytes: Uint8Array): string {
-  const decoder = new TextDecoder('utf-8');
-  const parts: string[] = [];
-  let start = 0;
-  while (start < bytes.length) {
-    let end = Math.min(start + UTF8_DECODE_CHUNK, bytes.length);
-    // Não corta no meio de uma sequência multibyte (bytes de continuação são 10xxxxxx).
-    while (end < bytes.length && end > start && (bytes[end] & 0xc0) === 0x80) end--;
-    parts.push(decoder.decode(bytes.subarray(start, end)));
-    start = end;
-  }
-  return parts.join('');
-}
-
 // ─── Cifra do envelope ───────────────────────────────────────────────────────
+
+/** Final do JSON do cabeçalho (`data_b64` vazio é a última chave): onde entra o ciphertext em base64. */
+const DATA_B64_EMPTY_TAIL = '"data_b64":""}';
 
 function buildAad(
   exportedAt: string,
@@ -249,7 +243,8 @@ export async function encryptBackupPayload(
   };
   // Tamanho exato do arquivo final: cabeçalho + base64(ciphertext + tag). Falha aqui, em
   // milissegundos, em vez de depois de gastar scrypt + cifra num arquivo impossível de restaurar.
-  const envelopeChars = JSON.stringify(header).length + 4 * Math.ceil((plaintext.length + GCM_TAG_BYTES) / 3);
+  const headerJson = JSON.stringify(header);
+  const envelopeChars = headerJson.length + 4 * Math.ceil((plaintext.length + GCM_TAG_BYTES) / 3);
   if (envelopeChars > MAX_BACKUP_BYTES) {
     plaintext.fill(0);
     throw new Error('O backup passaria de 50 MB e não poderia ser restaurado. Exclua gravações antigas antes de exportar.');
@@ -263,7 +258,10 @@ export async function encryptBackupPayload(
     key.fill(0);
     plaintext.fill(0);
   }
-  return JSON.stringify({ ...header, data_b64: n.fromByteArray(sealed) });
+  // `data_b64` é a última chave do cabeçalho (vazia) e o base64 nunca precisa de escape JSON: monta o
+  // arquivo por concatenação em vez de um segundo JSON.stringify sobre ~48 MB (uma cópia a menos).
+  // Resultado idêntico a JSON.stringify({ ...header, data_b64 }).
+  return `${headerJson.slice(0, -DATA_B64_EMPTY_TAIL.length)}"data_b64":"${n.fromByteArray(sealed)}"}`;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -318,12 +316,14 @@ export async function decryptBackupText(text: string, passphrase: string): Promi
     throw new Error('Arquivo de backup incompleto ou corrompido.');
   }
   const aad = buildAad(env.exportedAt, env.stats, env.kdf, env.cipher.nonce_b64);
-  const sealed = base64ToBytes(n, env.data_b64);
+  // `sealed`/`plain` (dezenas de MB cada) são soltos assim que deixam de ser usados: a referência
+  // some antes do JSON.parse, que é onde o pico de memória acontece.
+  let sealed: Uint8Array | null = base64ToBytes(n, env.data_b64);
   env.data_b64 = '';
   if (sealed.length < GCM_TAG_BYTES) throw new Error('Arquivo de backup incompleto ou corrompido.');
 
   const key = await deriveKey(n, passphrase, salt, env.kdf.N);
-  let plain: Uint8Array;
+  let plain: Uint8Array | null;
   try {
     plain = gcmDecrypt(n, key, nonce, sealed, aad);
   } catch {
@@ -331,6 +331,7 @@ export async function decryptBackupText(text: string, passphrase: string): Promi
   } finally {
     key.fill(0);
     sealed.fill(0);
+    sealed = null;
   }
   if (plain.length > MAX_BACKUP_BYTES) {
     plain.fill(0);
@@ -338,9 +339,12 @@ export async function decryptBackupText(text: string, passphrase: string): Promi
   }
   let json: string;
   try {
-    json = decodeUtf8Chunked(plain);
+    json = decodeUtf8Strict(n, plain); // UTF-8 estrito, nativo (sem TextDecoder em JS)
+  } catch {
+    throw new Error('Conteúdo do backup corrompido.');
   } finally {
     plain.fill(0);
+    plain = null;
   }
   try {
     return JSON.parse(json);

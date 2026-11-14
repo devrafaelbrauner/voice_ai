@@ -613,6 +613,83 @@ describe('compatibilidade do envelope v2 (código antigo em @noble <-> código n
   });
 });
 
+describe('UTF-8 estrito no decode do envelope (conversor nativo, sem TextDecoder)', () => {
+  /** Envelope v2 válido (senha PASS, N=2^14) cujo plaintext são BYTES arbitrários, cifrado por node:crypto. */
+  function envelopeFromBytes(plain: Uint8Array): string {
+    const salt = Buffer.alloc(16, 5);
+    const nonce = Buffer.alloc(12, 6);
+    const stats = samplePayload().stats;
+    const exportedAt = '2025-06-01T12:00:00.000Z';
+    const kdf = { name: 'scrypt', N: 2 ** 14, r: 8, p: 1, salt_b64: salt.toString('base64') };
+    const nonceB64 = nonce.toString('base64');
+    const aad = Buffer.from(
+      JSON.stringify(['voiceai-backup', 2, exportedAt, stats, 'scrypt', kdf.N, 8, 1, kdf.salt_b64, nonceB64])
+    );
+    const key = nodeCrypto.scryptSync(PASS.normalize('NFKC'), salt, 32, { N: kdf.N, r: 8, p: 1 });
+    const c = nodeCrypto.createCipheriv('aes-256-gcm', key, nonce);
+    c.setAAD(aad);
+    const sealed = Buffer.concat([c.update(plain), c.final(), c.getAuthTag()]);
+    return JSON.stringify({
+      _voiceai: 'encrypted-backup-v2',
+      version: 2,
+      exportedAt,
+      stats,
+      kdf,
+      cipher: { name: 'aes-256-gcm', nonce_b64: nonceB64 },
+      data_b64: sealed.toString('base64'),
+    });
+  }
+
+  const json = (transcript: string) => Buffer.from(JSON.stringify({ ...samplePayload(), recordings: [{ transcript }] }), 'utf8');
+
+  test('multibyte/emoji de 2, 3 e 4 bytes fazem round-trip; BOM e U+FFFD legítimos não são alterados', async () => {
+    const decoder = jest.spyOn(globalThis, 'TextDecoder').mockImplementation(() => {
+      throw new Error('TextDecoder não pode estar no caminho de decifra');
+    });
+    try {
+      for (const t of ['ação', '€ 100', '😀👨‍⚕️', '中文', '\ufeffBOM', 'FFFD \ufffd', 'a\u0000b']) {
+        const p = { ...samplePayload(), recordings: [{ ...samplePayload().recordings[0], transcript: t }] };
+        const out = (await decryptBackupText(await encryptBackupPayload(p, PASS), PASS)) as BackupPayload;
+        expect(out.recordings[0].transcript).toBe(t);
+      }
+    } finally {
+      decoder.mockRestore();
+    }
+  });
+
+  test('o decode cruza as fronteiras de pedaço de 1 MB sem partir caracteres de 3 e 4 bytes', async () => {
+    for (const ch of ['€', '😀', 'á']) {
+      const transcript = `x${ch.repeat(Math.ceil((1.3 * MB) / Buffer.byteLength(ch)))}`; // 1 byte de deslocamento
+      const out = (await decryptBackupText(await encryptBackupPayload({ ...samplePayload(), recordings: [{ ...samplePayload().recordings[0], transcript }] }, PASS), PASS)) as BackupPayload;
+      expect(out.recordings[0].transcript === transcript).toBe(true);
+    }
+  });
+
+  test('plaintext com UTF-8 inválido (senha certa, GCM ok) é recusado como corrompido — não é "senha errada" nem vira U+FFFD', async () => {
+    const bad: [string, (b: Buffer) => Buffer][] = [
+      ['byte solto 0x80', (b) => Buffer.concat([b.subarray(0, 20), Buffer.from([0x80]), b.subarray(20)])],
+      ['0xFF', (b) => Buffer.concat([b.subarray(0, 20), Buffer.from([0xff]), b.subarray(20)])],
+      ['overlong C0 AF', (b) => Buffer.concat([b.subarray(0, 20), Buffer.from([0xc0, 0xaf]), b.subarray(20)])],
+      ['surrogate ED A0 80', (b) => Buffer.concat([b.subarray(0, 20), Buffer.from([0xed, 0xa0, 0x80]), b.subarray(20)])],
+      ['truncado no fim', (b) => b.subarray(0, b.length - 1)],
+    ];
+    for (const [label, mangle] of bad) {
+      const err = await decryptBackupText(envelopeFromBytes(mangle(json('olá'))), PASS).catch((e: unknown) => e);
+      expect([label, err instanceof BackupPassphraseError, (err as Error).message]).toEqual([label, false, 'Conteúdo do backup corrompido.']);
+    }
+    // controle: o mesmo envelope sem alteração abre
+    const ok = (await decryptBackupText(envelopeFromBytes(json('olá')), PASS)) as BackupPayload;
+    expect(ok.recordings[0].transcript).toBe('olá');
+  });
+
+  test('UTF-8 inválido depois da primeira fronteira de 1 MB também é recusado', async () => {
+    const head = json('x'.repeat(1.5 * MB));
+    const at = Math.floor(1.2 * MB);
+    const mangled = Buffer.concat([head.subarray(0, at), Buffer.from([0xc3, 0x28]), head.subarray(at)]);
+    await expect(decryptBackupText(envelopeFromBytes(mangled), PASS)).rejects.toThrow('Conteúdo do backup corrompido.');
+  });
+});
+
 describe('limite de 50 MB: checado ANTES de qualquer KDF/cifra', () => {
   const URI = 'file:///cache/picked/arquivo.json';
 

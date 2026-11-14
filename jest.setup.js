@@ -102,6 +102,23 @@ jest.mock('react-native-quick-crypto', () => {
     createCipheriv: jest.fn((...args) => nodeCrypto.createCipheriv(...args)),
     createDecipheriv: jest.fn((...args) => nodeCrypto.createDecipheriv(...args)),
     Buffer,
+    // Utils nativo (JSI/C++): bufferToString('utf8') é PERMISSIVO (bytes inválidos -> U+FFFD, como o
+    // createFromUtf8 do Hermes; o Buffer.toString do Node idem) e stringToBuffer('utf8') só emite
+    // UTF-8 bem formado. A validação estrita do app é por ida e volta, então o mock tem que ter a
+    // mesma semântica permissiva — nunca um decodificador fatal, que esconderia um erro de lógica.
+    bufferToString: jest.fn((ab, encoding, start, end) =>
+      Buffer.from(ab, start, end - start).toString(encoding === 'utf-8' ? 'utf8' : encoding)
+    ),
+    stringToBuffer: jest.fn((str, encoding) => {
+      const b = Buffer.from(str, encoding === 'utf-8' ? 'utf8' : encoding);
+      return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+    }),
+    timingSafeEqual: jest.fn((a, b) => {
+      const view = (x) => (ArrayBuffer.isView(x) ? new Uint8Array(x.buffer, x.byteOffset, x.byteLength) : new Uint8Array(x));
+      const [va, vb] = [view(a), view(b)];
+      if (va.byteLength !== vb.byteLength) throw new RangeError('Input buffers must have the same byte length');
+      return nodeCrypto.timingSafeEqual(va, vb);
+    }),
   };
 });
 

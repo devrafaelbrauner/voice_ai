@@ -6,6 +6,8 @@
  *     sem ponte assíncrona por campo) e base64 nativo: em JS puro (@noble) o Hermes fazia
  *     ~0,7 MB/s e parava a thread JS ao ler/gravar dezenas de MB. Sem fallback para JS: sem o
  *     módulo no binário, encrypt/decrypt lançam erro claro (ver native-crypto.ts).
+ *     O texto decifrado vira string pelo conversor UTF-8 nativo (decodeUtf8Strict), nunca pelo
+ *     TextDecoder em JS (~1,6 ms por campo de 4,5 KB no Hermes).
  *     Hermes/React Native não expõe crypto.subtle, então WebCrypto não é usado.
  *   - Aleatoriedade (chave de 32 bytes, IV de 12 bytes) vem de expo-crypto
  *     (CSPRNG do sistema operacional) — nunca Math.random.
@@ -26,7 +28,7 @@
 
 import * as SecureStore from 'expo-secure-store';
 import { getRandomValues } from 'expo-crypto';
-import { loadNativeCrypto, gcmEncrypt, gcmDecrypt } from './native-crypto';
+import { loadNativeCrypto, gcmEncrypt, gcmDecrypt, decodeUtf8Strict } from './native-crypto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { logWarn } from './log';
 
@@ -171,7 +173,8 @@ export async function decrypt(stored: string): Promise<string> {
     const sealed = n.toByteArray(rest.slice(colonIdx + 1));
 
     const key = await getKey();
-    return new TextDecoder().decode(gcmDecrypt(n, key, iv, sealed));
+    // UTF-8 estrito pelo conversor nativo (o TextDecoder do Hermes/Expo é JS e domina o custo por campo).
+    return decodeUtf8Strict(n, gcmDecrypt(n, key, iv, sealed));
   } catch {
     // Seg #1: falha de decriptação — chave errada (dado cifrado em outro dispositivo),
     // dado corrompido ou chave local indisponível/inválida.

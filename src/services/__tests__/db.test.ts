@@ -355,6 +355,72 @@ describe('db-crypto com AES-GCM nativo (formato enc1:iv:ct inalterado)', () => {
     }
   });
 
+  /** enc1 com a chave da fixture para BYTES arbitrários (inclusive UTF-8 inválido), cifrado por node:crypto. */
+  const sealBytes = (keyB64: string, bytes: Uint8Array): string => {
+    const nodeCrypto = jest.requireActual<typeof import('node:crypto')>('node:crypto');
+    const iv = nodeCrypto.randomBytes(12);
+    const c = nodeCrypto.createCipheriv('aes-256-gcm', Buffer.from(keyB64, 'base64'), iv);
+    const ct = Buffer.concat([c.update(bytes), c.final(), c.getAuthTag()]);
+    return `enc1:${iv.toString('base64')}:${ct.toString('base64')}`;
+  };
+
+  test('UTF-8/multibyte/emoji: round-trip exato, sem TextDecoder (que é JS no Hermes) e sem perder BOM/U+FFFD/NUL', async () => {
+    secureStore().set('db_aes_key_v1', FIXTURE.keyB64);
+    const decoder = jest.spyOn(globalThis, 'TextDecoder').mockImplementation(() => {
+      throw new Error('TextDecoder não pode estar no caminho de decifra');
+    });
+    try {
+      const samples = [
+        '',
+        'ação — não há 😀 👨‍⚕️',
+        '中文 日本語 한국어 العربية',
+        'a\u0000b',
+        '\ufeffcom BOM no início', // o TextDecoder descartaria; o dado do usuário tem que voltar igual
+        'U+FFFD legítimo: \ufffd',
+        '\u{10ffff}\u{10000}',
+        'x'.repeat(4500) + 'é',
+      ];
+      for (const plain of samples) expect(await crypto.decrypt(await crypto.encrypt(plain))).toBe(plain);
+      // surrogate solto: o TextEncoder já o troca por U+FFFD ao cifrar (comportamento mantido)
+      expect(await crypto.decrypt(await crypto.encrypt('a\ud800b'))).toBe('a\ufffdb');
+      const { bufferToString } = jest.requireMock('react-native-quick-crypto') as { bufferToString: jest.Mock };
+      expect(bufferToString).toHaveBeenCalled(); // o caminho novo é o conversor nativo
+    } finally {
+      decoder.mockRestore();
+    }
+  });
+
+  test('UTF-8 inválido autenticado pelo GCM é rejeitado (vira sentinel, nunca texto com U+FFFD)', async () => {
+    secureStore().set('db_aes_key_v1', FIXTURE.keyB64);
+    const invalid: [string, number[]][] = [
+      ['byte de continuação solto', [0x61, 0x80, 0x62]],
+      ['0xFF', [0xff]],
+      ['sequência truncada no fim', [0x61, 0xe2, 0x82]],
+      ['lead sem continuação', [0xc3, 0x28]],
+      ['overlong de "/" (C0 AF)', [0xc0, 0xaf]],
+      ['overlong de 3 bytes (E0 80 AF)', [0xe0, 0x80, 0xaf]],
+      ['surrogate em UTF-8 (ED A0 80)', [0xed, 0xa0, 0x80]],
+      ['acima de U+10FFFF (F4 90 80 80)', [0xf4, 0x90, 0x80, 0x80]],
+      ['F5 inválido', [0xf5, 0x80, 0x80, 0x80]],
+      ['U+FFFD como bytes inválidos que decodificariam igual ao tamanho', [0xe0, 0x80, 0x80]],
+    ];
+    for (const [label, bytes] of invalid) {
+      const stored = sealBytes(FIXTURE.keyB64, Uint8Array.from(bytes));
+      expect([label, await crypto.decrypt(stored)]).toEqual([label, crypto.DECRYPT_FAILED_SENTINEL]);
+    }
+    // Válido logo ao lado do inválido continua abrindo (a checagem não é cega).
+    expect(await crypto.decrypt(sealBytes(FIXTURE.keyB64, Buffer.from('ok é 😀', 'utf8')))).toBe('ok é 😀');
+  });
+
+  test('a conferência é por CONTEÚDO, não só por tamanho: decodificador que devolve texto de mesmo tamanho porém diferente é rejeitado', async () => {
+    secureStore().set('db_aes_key_v1', FIXTURE.keyB64);
+    const stored = await crypto.encrypt('abc');
+    const { bufferToString } = jest.requireMock('react-native-quick-crypto') as { bufferToString: jest.Mock };
+    bufferToString.mockImplementationOnce(() => 'abd'); // p.ex. um U+FFFD único no lugar de 3 bytes inválidos
+    expect(await crypto.decrypt(stored)).toBe(crypto.DECRYPT_FAILED_SENTINEL);
+    expect(await crypto.decrypt(stored)).toBe('abc');
+  });
+
   test('chave errada ou dado adulterado continua dando o sentinel (nunca lança)', async () => {
     secureStore().set('db_aes_key_v1', Buffer.alloc(32, 1).toString('base64'));
     const { stored } = FIXTURE.cases[2];
