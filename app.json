@@ -64,7 +64,8 @@
       "expo-secure-store",
       "expo-sqlite",
       "expo-sharing",
-      "expo-asset"
+      "expo-asset",
+      "react-native-quick-crypto"
     ],
     "experiments": {
       "typedRoutes": true,

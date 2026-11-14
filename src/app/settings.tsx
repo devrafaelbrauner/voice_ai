@@ -542,6 +542,7 @@ export default function SettingsScreen() {
                   alignItems="center"
                   justifyContent="center"
                   gap="$2"
+                  minHeight={48}
                 >
                   <RefreshCw size={18} color={c.textOnAccent} />
                   <Text color={c.textOnAccent} fontWeight="700">
@@ -600,6 +601,7 @@ export default function SettingsScreen() {
                     alignItems="center"
                     justifyContent="center"
                     gap="$2"
+                    minHeight={48}
                   >
                     <KeyRound size={14} color={c.textOnAccent} />
                     <Text color={c.textOnAccent} fontWeight="700" fontSize={13}>
@@ -614,7 +616,15 @@ export default function SettingsScreen() {
                 accessibilityLabel="Sair da conta"
                 accessibilityHint="Encerra a sessão na nuvem"
               >
-                <XStack bg={c.accentRed} p="$3" borderRadius="$3" alignItems="center" justifyContent="center" gap="$2">
+                <XStack
+                  bg={c.accentRed}
+                  p="$3"
+                  minHeight={48}
+                  borderRadius="$3"
+                  alignItems="center"
+                  justifyContent="center"
+                  gap="$2"
+                >
                   <LogOut size={18} color={c.textOnAccent} />
                   <Text color={c.textOnAccent} fontWeight="700">Sair da conta</Text>
                 </XStack>
@@ -631,7 +641,15 @@ export default function SettingsScreen() {
                   accessibilityLabel="Entrar ou criar conta"
                   accessibilityHint="Navega para a tela de login e sincronização na nuvem"
                 >
-                  <XStack bg={c.accentBlue} p="$3" borderRadius="$3" alignItems="center" justifyContent="center" gap="$2">
+                  <XStack
+                    bg={c.accentBlue}
+                    p="$3"
+                    minHeight={48}
+                    borderRadius="$3"
+                    alignItems="center"
+                    justifyContent="center"
+                    gap="$2"
+                  >
                     <Cloud size={18} color={c.textOnAccent} />
                     <Text color={c.textOnAccent} fontWeight="700">Entrar ou criar conta</Text>
                   </XStack>
@@ -696,6 +714,7 @@ export default function SettingsScreen() {
               alignItems="center"
               justifyContent="center"
               gap="$2"
+              minHeight={48}
             >
               <Download size={16} color={c.textOnAccent} />
               <Text fontSize={13} color={c.textOnAccent} fontWeight="700">
@@ -721,6 +740,7 @@ export default function SettingsScreen() {
               alignItems="center"
               justifyContent="center"
               gap="$2"
+              minHeight={48}
               opacity={pickingBackup ? 0.6 : 1}
             >
               <Upload size={16} color={c.accentBlue} />
@@ -1221,7 +1241,12 @@ export default function SettingsScreen() {
               autoCorrect={false}
               style={[inputStyle, { flex: 1, borderWidth: 0, borderRadius: 0 }]}
             />
-            <Pressable onPress={() => setShowApiKey((v) => !v)} hitSlop={8}>
+            <Pressable
+              onPress={() => setShowApiKey((v) => !v)}
+              accessibilityRole="button"
+              accessibilityLabel={showApiKey ? 'Ocultar chave' : 'Mostrar chave'}
+              style={{ minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}
+            >
               {showApiKey ? (
                 <EyeOff size={18} color={c.textMuted} />
               ) : (
@@ -1239,6 +1264,7 @@ export default function SettingsScreen() {
               <XStack
                 bg={c.primary}
                 p="$3"
+                minHeight={48}
                 borderRadius="$3"
                 alignItems="center"
                 justifyContent="center"
@@ -1260,6 +1286,8 @@ export default function SettingsScreen() {
                 <XStack
                   bg={c.accentRed}
                   p="$3"
+                  minHeight={48}
+                  minWidth={48}
                   borderRadius="$3"
                   alignItems="center"
                   justifyContent="center"
@@ -1311,6 +1339,7 @@ export default function SettingsScreen() {
               <XStack
                 bg={c.primary}
                 p="$3"
+                minHeight={48}
                 borderRadius="$3"
                 alignItems="center"
                 justifyContent="center"
@@ -1332,6 +1361,8 @@ export default function SettingsScreen() {
                 <XStack
                   bg={c.accentRed}
                   p="$3"
+                  minHeight={48}
+                  minWidth={48}
                   borderRadius="$3"
                   alignItems="center"
                   justifyContent="center"
@@ -1478,6 +1509,7 @@ export default function SettingsScreen() {
                 borderRadius="$3"
                 px="$3"
                 py="$2"
+                minHeight={48}
                 alignItems="center"
                 justifyContent="center"
                 gap="$2"
@@ -1525,6 +1557,7 @@ export default function SettingsScreen() {
                 borderRadius="$3"
                 px="$3"
                 py="$2"
+                minHeight={48}
                 alignItems="center"
                 justifyContent="center"
                 gap="$2"
@@ -1643,8 +1676,9 @@ export default function SettingsScreen() {
             />
             <Pressable
               onPress={() => setShowBirdIdToken((v) => !v)}
+              accessibilityRole="button"
               accessibilityLabel={showBirdIdToken ? 'Ocultar sessão' : 'Mostrar sessão'}
-              hitSlop={8}
+              style={{ minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}
             >
               {showBirdIdToken ? (
                 <EyeOff size={18} color={c.textPlaceholder} />
@@ -1653,7 +1687,12 @@ export default function SettingsScreen() {
               )}
             </Pressable>
             {birdIdToken.trim().length > 0 && (
-              <Pressable onPress={handleClearBirdIdToken} hitSlop={8} accessibilityLabel="Remover sessão">
+              <Pressable
+                onPress={handleClearBirdIdToken}
+                accessibilityRole="button"
+                accessibilityLabel="Remover sessão"
+                style={{ minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}
+              >
                 <XIcon size={16} color={c.textPlaceholder} />
               </Pressable>
             )}
@@ -1672,6 +1711,7 @@ export default function SettingsScreen() {
                 borderColor={c.primary}
                 borderRadius={8}
                 p="$2"
+                minHeight={48}
                 alignItems="center"
                 justifyContent="center"
                 gap="$1"
@@ -1702,6 +1742,7 @@ export default function SettingsScreen() {
                 bg={birdIdSaved ? 'rgba(22,163,74,0.12)' : c.primary}
                 borderRadius={8}
                 p="$2"
+                minHeight={48}
                 alignItems="center"
                 justifyContent="center"
                 gap="$1"
@@ -1887,6 +1928,7 @@ export default function SettingsScreen() {
                   borderRadius="$3"
                   px="$3"
                   py="$2"
+                  minHeight={48}
                   alignItems="center"
                   justifyContent="center"
                   gap="$2"

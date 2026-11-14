@@ -140,6 +140,7 @@ export default function TemplatesScreen() {
         <YStack f={1} bg={c.bgScreen} p="$4" gap="$3">
           <XStack alignItems="center" gap="$3" mt="$6">
             <Pressable
+              style={{ minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}
               onPress={cancelForm}
               accessibilityRole="button"
               accessibilityLabel="Cancelar e voltar para lista de templates"
@@ -150,6 +151,7 @@ export default function TemplatesScreen() {
               {editingId ? 'Editar Template' : 'Novo Template'}
             </Text>
             <Pressable
+              style={{ minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}
               onPress={saveForm}
               accessibilityRole="button"
               accessibilityLabel={editingId ? 'Salvar alterações do template' : 'Criar novo template'}
@@ -259,6 +261,7 @@ export default function TemplatesScreen() {
             alignItems="center"
             justifyContent="center"
             gap="$2"
+            minHeight={48}
           >
             <Plus size={20} color={c.textOnAccent} />
             <Text color={c.textOnAccent} fontWeight="700">
@@ -291,7 +294,7 @@ export default function TemplatesScreen() {
                     </Text>
                     <Pressable
                       onPress={() => startEdit(t)}
-                      hitSlop={8}
+                      style={{ minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}
                       accessibilityRole="button"
                       accessibilityLabel={`Editar template: ${t.name}`}
                     >
@@ -299,7 +302,7 @@ export default function TemplatesScreen() {
                     </Pressable>
                     <Pressable
                       onPress={() => confirmDelete(t)}
-                      hitSlop={8}
+                      style={{ minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}
                       accessibilityRole="button"
                       accessibilityLabel={`Excluir template: ${t.name}`}
                     >

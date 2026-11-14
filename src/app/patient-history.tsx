@@ -259,7 +259,7 @@ export default function PatientHistoryScreen() {
         <XStack alignItems="center" gap="$3">
           <Link href="/patients" asChild>
             <Pressable
-              hitSlop={8}
+              style={styles.iconTouch}
               accessibilityRole="button"
               accessibilityLabel="Voltar para lista de pacientes"
             >
@@ -354,6 +354,7 @@ export default function PatientHistoryScreen() {
               justifyContent="center"
               gap="$2"
               mt="$1"
+              minHeight={48}
             >
               <Share size={16} color="#fff" />
               <Text fontWeight="700" fontSize={13} color="#fff">
@@ -472,6 +473,7 @@ export default function PatientHistoryScreen() {
                             py="$2"
                             alignItems="center"
                             gap="$2"
+                            minHeight={48}
                             bg={c.bgPurpleSoft}
                           >
                             <BookOpen size={14} color={c.secondary} />
@@ -491,7 +493,7 @@ export default function PatientHistoryScreen() {
                               ) : (
                                 <Pressable
                                   onPress={() => copyText(item.summary!, copySmKey)}
-                                  hitSlop={8}
+                                  style={styles.iconTouch}
                                   accessibilityRole="button"
                                   accessibilityLabel={`Copiar resumo de ${displayName}`}
                                 >
@@ -505,7 +507,7 @@ export default function PatientHistoryScreen() {
                                     `${templateName ?? 'Resumo'} — ${displayName}`
                                   )
                                 }
-                                hitSlop={8}
+                                style={styles.iconTouch}
                                 accessibilityRole="button"
                                 accessibilityLabel={`Compartilhar resumo de ${displayName}`}
                               >
@@ -547,6 +549,7 @@ export default function PatientHistoryScreen() {
                             py="$2"
                             alignItems="center"
                             gap="$2"
+                            minHeight={48}
                             bg={c.bgSubtle}
                           >
                             <FileText size={14} color={c.primary} />
@@ -566,7 +569,7 @@ export default function PatientHistoryScreen() {
                               ) : (
                                 <Pressable
                                   onPress={() => copyText(item.transcript!, copyTxKey)}
-                                  hitSlop={8}
+                                  style={styles.iconTouch}
                                   accessibilityRole="button"
                                   accessibilityLabel={`Copiar transcrição de ${displayName}`}
                                 >
@@ -619,6 +622,12 @@ export default function PatientHistoryScreen() {
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
+  iconTouch: {
+    minWidth: 48,
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   avatar: {
     width: 60,
     height: 60,

@@ -4,7 +4,6 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   TextInput,
@@ -28,7 +27,7 @@ interface Props {
   onClose: () => void;
 }
 
-const TIME_HINT = 'Isso pode levar de cerca de 30 segundos a alguns minutos… Mantenha o aplicativo aberto.';
+const TIME_HINT = 'Isso pode levar alguns segundos (até cerca de 30 s em bancos grandes)… Mantenha o aplicativo aberto.';
 
 export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClose }: Props) {
   const c = useColors();
@@ -38,6 +37,15 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
+  // Rolagem até o campo focado: o teclado cobria "Confirmar senha" (e o toque nele não focava).
+  const scrollRef = useRef<ScrollView>(null);
+  const confirmRef = useRef<TextInput>(null);
+  const fieldY = useRef({ passphrase: 0, confirm: 0 });
+  const focusedField = useRef<'passphrase' | 'confirm' | null>(null);
+  const scrollToField = (field: 'passphrase' | 'confirm') => {
+    focusedField.current = field;
+    scrollRef.current?.scrollTo({ y: Math.max(0, fieldY.current[field] - 12), animated: true });
+  };
 
   useEffect(() => {
     mounted.current = true;
@@ -111,7 +119,8 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
     >
       <KeyboardAvoidingView
         style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        // Android edge-to-edge (Expo 55) não redimensiona a janela: o 'padding' sobe o cartão acima do teclado.
+        behavior="padding"
       >
         <YStack
           flex={1}
@@ -120,7 +129,16 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
           <YStack
             style={{ backgroundColor: c.bgCard, borderRadius: 16, width: '100%', maxHeight: '90%', overflow: 'hidden' }}
           >
-            <ScrollView keyboardShouldPersistTaps="handled" bounces={false}>
+            <ScrollView
+              ref={scrollRef}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="none"
+              bounces={false}
+              // O teclado só encolhe a área visível DEPOIS do foco: ao mudar o tamanho, rola de novo.
+              onLayout={() => {
+                if (focusedField.current) scrollToField(focusedField.current);
+              }}
+            >
               <YStack style={{ padding: 20, gap: 14 }}>
                 <XStack style={{ alignItems: 'center', gap: 8 }}>
                   <Lock size={20} color={c.accentBlue} />
@@ -145,7 +163,10 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
                   </Text>
                 )}
 
-                <YStack style={{ gap: 6 }}>
+                <YStack
+                  style={{ gap: 6 }}
+                  onLayout={(e) => { fieldY.current.passphrase = e.nativeEvent.layout.y; }}
+                >
                   <Text style={{ fontSize: 12, fontWeight: '700', color: c.textLabel }}>
                     {creating ? 'Senha do backup' : 'Senha'}
                   </Text>
@@ -156,6 +177,8 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
                         setPassphrase(v);
                         if (error) setError(null);
                       }}
+                      onFocus={() => scrollToField('passphrase')}
+                      onBlur={() => { if (focusedField.current === 'passphrase') focusedField.current = null; }}
                       secureTextEntry={!show}
                       editable={!busy}
                       autoCapitalize="none"
@@ -164,7 +187,7 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
                       importantForAutofill="no"
                       textContentType="none"
                       returnKeyType={creating ? 'next' : 'done'}
-                      onSubmitEditing={creating ? undefined : submit}
+                      onSubmitEditing={creating ? () => confirmRef.current?.focus() : submit}
                       placeholder={creating ? 'Mínimo de 12 caracteres' : 'Senha do backup'}
                       placeholderTextColor={c.textPlaceholder}
                       accessibilityLabel={creating ? 'Senha do backup' : 'Senha para restaurar o backup'}
@@ -186,14 +209,20 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
                 </YStack>
 
                 {creating && (
-                  <YStack style={{ gap: 6 }}>
+                  <YStack
+                    style={{ gap: 6 }}
+                    onLayout={(e) => { fieldY.current.confirm = e.nativeEvent.layout.y; }}
+                  >
                     <Text style={{ fontSize: 12, fontWeight: '700', color: c.textLabel }}>Confirmar senha</Text>
                     <TextInput
+                      ref={confirmRef}
                       value={confirm}
                       onChangeText={(v) => {
                         setConfirm(v);
                         if (error) setError(null);
                       }}
+                      onFocus={() => scrollToField('confirm')}
+                      onBlur={() => { if (focusedField.current === 'confirm') focusedField.current = null; }}
                       secureTextEntry={!show}
                       editable={!busy}
                       autoCapitalize="none"
@@ -242,7 +271,12 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
                     accessibilityRole="button"
                     accessibilityLabel="Cancelar"
                     accessibilityState={{ disabled: busy }}
-                    style={{ paddingVertical: 12, paddingHorizontal: 16, opacity: busy ? 0.4 : 1 }}
+                    style={{
+                      minHeight: 48,
+                      justifyContent: 'center',
+                      paddingHorizontal: 16,
+                      opacity: busy ? 0.4 : 1,
+                    }}
                   >
                     <Text style={{ fontSize: 14, fontWeight: '600', color: c.textSecondary }}>Cancelar</Text>
                   </Pressable>
@@ -255,7 +289,8 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
                     style={{
                       backgroundColor: canSubmit ? c.accentBlue : c.bgSubtle,
                       borderRadius: 8,
-                      paddingVertical: 12,
+                      minHeight: 48,
+                      justifyContent: 'center',
                       paddingHorizontal: 18,
                     }}
                   >

@@ -5,22 +5,34 @@
 //
 // Formato v2 ("encrypted-backup-v2") — protegido por passphrase escolhida pelo usuário
 // (a chave AES do aparelho NÃO serve: o backup precisa abrir em outro aparelho):
-//   - KDF: scrypt (@noble/hashes), N=2^14 na exportação, r=8, p=1, salt aleatório de 16 bytes.
+//   - KDF: scrypt, N=2^14 na exportação, r=8, p=1, salt aleatório de 16 bytes.
 //     Na importação só são aceitos N ∈ {2^14, 2^16} com r=8 e p=1 (allow-list: um arquivo
 //     malicioso não escolhe custo de memória/CPU).
-//   - Cifra: AES-256-GCM (@noble/ciphers), nonce aleatório de 12 bytes. Salt/nonce vêm do
-//     CSPRNG do sistema via expo-crypto.
+//   - Cifra: AES-256-GCM, nonce aleatório de 12 bytes; `data_b64` = ciphertext || tag(16).
+//     Salt/nonce vêm do CSPRNG do sistema via expo-crypto.
 //   - O cabeçalho (versão, KDF, salt, nonce, exportedAt, stats) é autenticado como AAD.
 //   - Nunca se exporta texto puro: se cifrar falhar, a exportação aborta.
-// Limite de 50 MB na importação (arquivo e payload).
+// scrypt, AES-GCM e base64 rodam em código NATIVO (react-native-quick-crypto / OpenSSL e
+// react-native-quick-base64): o scrypt corre no thread pool do C++, fora da thread JS (em JS
+// puro no Hermes levava ~49 s por senha e travava a UI). Sem fallback para JS puro: se o
+// módulo nativo não estiver no binário, o backup falha com mensagem clara. O formato do
+// envelope é o mesmo da implementação anterior (@noble): backups antigos abrem e novos também.
+// Limite de 50 MB (arquivo/envelope), verificado ANTES de qualquer KDF ou cifra.
 
 import { Alert } from 'react-native';
 import * as Sharing from 'expo-sharing';
 import * as DocumentPicker from 'expo-document-picker';
 import { File, Paths } from 'expo-file-system';
 import { getRandomValues } from 'expo-crypto';
-import { scryptAsync } from '@noble/hashes/scrypt.js';
-import { gcm } from '@noble/ciphers/aes.js';
+import {
+  loadNativeCrypto,
+  asBytes,
+  gcmEncrypt,
+  gcmDecrypt,
+  decodeUtf8Strict,
+  GCM_TAG_BYTES,
+  type NativeCrypto,
+} from './native-crypto';
 import type { SQLiteDatabase } from 'expo-sqlite';
 import {
   getDb,
@@ -48,6 +60,9 @@ const KDF_N_ALLOWED: readonly number[] = [2 ** 14, 2 ** 16];
 const SALT_BYTES = 16;
 const NONCE_BYTES = 12;
 const KEY_BYTES = 32;
+// scrypt N=2^16, r=8 usa 64 MiB (128·r·N); o padrão da lib (32 MiB) recusaria. Folga p/ a allow-list.
+const KDF_MAXMEM = 128 * 1024 * 1024;
+const FILE_TOO_BIG_MESSAGE = 'O arquivo tem mais de 50 MB e não é um backup válido.';
 
 const MIN_PASSPHRASE_LENGTH = 12;
 
@@ -134,52 +149,31 @@ export function validatePassphrase(passphrase: string): string | null {
 /** NFKC: o mesmo texto digitado em teclados diferentes gera os mesmos bytes. */
 const normalizePassphrase = (p: string): string => p.normalize('NFKC');
 
-// ─── Bytes <-> base64 / UTF-8 (em pedaços: arquivos de dezenas de MB) ────────
+// ─── base64 nativo + KDF ─────────────────────────────────────────────────────
 
-const B64_ENCODE_CHUNK = 3 * 8192; // múltiplo de 3: pedaços concatenam sem padding intermediário
-const B64_DECODE_CHUNK = 4 * 8192;
+const BASE64_STRICT_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+const BASE64_STRICT_MAX_CHARS = 1024;
 
-function bytesToBase64(bytes: Uint8Array): string {
-  const parts: string[] = [];
-  for (let i = 0; i < bytes.length; i += B64_ENCODE_CHUNK) {
-    const slice = bytes.subarray(i, i + B64_ENCODE_CHUNK);
-    parts.push(btoa(String.fromCharCode.apply(null, slice as unknown as number[])));
+/**
+ * base64 -> bytes pelo decodificador nativo (arquivos de dezenas de MB). Comprimento múltiplo de 4
+ * sempre; alfabeto/padding estritos conferidos por regex nas strings curtas (salt/nonce) — o
+ * ciphertext grande é autenticado pelo GCM, então não precisa varrer 50 MB em JS.
+ */
+function base64ToBytes(n: NativeCrypto, b64: string): Uint8Array {
+  const corrupt = () => new Error('Arquivo de backup corrompido (base64 inválido).');
+  if (b64.length % 4 !== 0) throw corrupt();
+  if (b64.length <= BASE64_STRICT_MAX_CHARS && !BASE64_STRICT_RE.test(b64)) throw corrupt();
+  try {
+    return asBytes(n.toByteArray(b64));
+  } catch {
+    throw corrupt();
   }
-  return parts.join('');
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  if (b64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(b64)) {
-    throw new Error('Arquivo de backup corrompido (base64 inválido).');
-  }
-  const padding = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
-  const out = new Uint8Array((b64.length / 4) * 3 - padding);
-  let o = 0;
-  for (let i = 0; i < b64.length; i += B64_DECODE_CHUNK) {
-    const bin = atob(b64.slice(i, i + B64_DECODE_CHUNK));
-    for (let j = 0; j < bin.length; j++) out[o++] = bin.charCodeAt(j);
-  }
-  return out;
-}
-
-const UTF8_DECODE_CHUNK = 1 << 20;
-
-/** Decodifica UTF-8 em pedaços de ~1 MB cortados em fronteira de caractere (sem depender de `stream`). */
-function decodeUtf8Chunked(bytes: Uint8Array): string {
-  const decoder = new TextDecoder('utf-8');
-  const parts: string[] = [];
-  let start = 0;
-  while (start < bytes.length) {
-    let end = Math.min(start + UTF8_DECODE_CHUNK, bytes.length);
-    // Não corta no meio de uma sequência multibyte (bytes de continuação são 10xxxxxx).
-    while (end < bytes.length && end > start && (bytes[end] & 0xc0) === 0x80) end--;
-    parts.push(decoder.decode(bytes.subarray(start, end)));
-    start = end;
-  }
-  return parts.join('');
 }
 
 // ─── Cifra do envelope ───────────────────────────────────────────────────────
+
+/** Final do JSON do cabeçalho (`data_b64` vazio é a última chave): onde entra o ciphertext em base64. */
+const DATA_B64_EMPTY_TAIL = '"data_b64":""}';
 
 function buildAad(
   exportedAt: string,
@@ -195,25 +189,27 @@ function buildAad(
   );
 }
 
-async function deriveKey(
-  passphrase: string,
-  salt: Uint8Array,
-  N: number
-): Promise<Uint8Array> {
-  return scryptAsync(normalizePassphrase(passphrase), salt, {
-    N,
-    r: KDF_R,
-    p: KDF_P,
-    dkLen: KEY_BYTES,
-    // scrypt N=2^16 usa 64 MiB; o padrão (1 GiB) já cobre a allow-list.
+/** Deriva a chave com scrypt nativo (thread pool do C++): a thread JS fica livre durante a espera. */
+function deriveKey(n: NativeCrypto, passphrase: string, salt: Uint8Array, N: number): Promise<Uint8Array> {
+  const password = new TextEncoder().encode(normalizePassphrase(passphrase));
+  return new Promise<Uint8Array>((resolve, reject) => {
+    n.scrypt(password, salt, KEY_BYTES, { N, r: KDF_R, p: KDF_P, maxmem: KDF_MAXMEM }, (err, key) => {
+      password.fill(0);
+      if (err || !key) reject(new Error('Falha ao derivar a chave de criptografia (módulo nativo).'));
+      else resolve(asBytes(key));
+    });
   });
 }
 
-/** Serializa e cifra o payload. Lança se qualquer etapa falhar — nunca produz texto puro. */
+/**
+ * Serializa e cifra o payload. Lança se qualquer etapa falhar — nunca produz texto puro.
+ * O tamanho do envelope é calculado e comparado com o limite de 50 MB ANTES do scrypt e da cifra.
+ */
 export async function encryptBackupPayload(
   payload: BackupPayload,
   passphrase: string
 ): Promise<string> {
+  const n = loadNativeCrypto();
   const salt = getRandomValues(new Uint8Array(SALT_BYTES));
   const nonce = getRandomValues(new Uint8Array(NONCE_BYTES));
   const kdf: EncryptedBackupEnvelope['kdf'] = {
@@ -221,9 +217,9 @@ export async function encryptBackupPayload(
     N: KDF_N_EXPORT,
     r: KDF_R,
     p: KDF_P,
-    salt_b64: bytesToBase64(salt),
+    salt_b64: n.fromByteArray(salt),
   };
-  const nonceB64 = bytesToBase64(nonce);
+  const nonceB64 = n.fromByteArray(nonce);
   const { doctor, recordings, customTemplates } = payload;
   const plaintext = new TextEncoder().encode(
     JSON.stringify({
@@ -236,29 +232,36 @@ export async function encryptBackupPayload(
     })
   );
 
-  const key = await deriveKey(passphrase, salt, kdf.N);
-  let ciphertext: Uint8Array;
-  try {
-    ciphertext = gcm(key, nonce, buildAad(payload.exportedAt, payload.stats, kdf, nonceB64)).encrypt(plaintext);
-  } finally {
-    key.fill(0);
-    plaintext.fill(0);
-  }
-
-  const envelope: EncryptedBackupEnvelope = {
+  const header: EncryptedBackupEnvelope = {
     _voiceai: FORMAT_ID,
     version: BACKUP_VERSION,
     exportedAt: payload.exportedAt,
     stats: payload.stats,
     kdf,
     cipher: { name: 'aes-256-gcm', nonce_b64: nonceB64 },
-    data_b64: bytesToBase64(ciphertext),
+    data_b64: '',
   };
-  const text = JSON.stringify(envelope);
-  if (text.length > MAX_BACKUP_BYTES) {
+  // Tamanho exato do arquivo final: cabeçalho + base64(ciphertext + tag). Falha aqui, em
+  // milissegundos, em vez de depois de gastar scrypt + cifra num arquivo impossível de restaurar.
+  const headerJson = JSON.stringify(header);
+  const envelopeChars = headerJson.length + 4 * Math.ceil((plaintext.length + GCM_TAG_BYTES) / 3);
+  if (envelopeChars > MAX_BACKUP_BYTES) {
+    plaintext.fill(0);
     throw new Error('O backup passaria de 50 MB e não poderia ser restaurado. Exclua gravações antigas antes de exportar.');
   }
-  return text;
+
+  const key = await deriveKey(n, passphrase, salt, kdf.N);
+  let sealed: Uint8Array;
+  try {
+    sealed = gcmEncrypt(n, key, nonce, plaintext, buildAad(payload.exportedAt, payload.stats, kdf, nonceB64));
+  } finally {
+    key.fill(0);
+    plaintext.fill(0);
+  }
+  // `data_b64` é a última chave do cabeçalho (vazia) e o base64 nunca precisa de escape JSON: monta o
+  // arquivo por concatenação em vez de um segundo JSON.stringify sobre ~48 MB (uma cópia a menos).
+  // Resultado idêntico a JSON.stringify({ ...header, data_b64 }).
+  return `${headerJson.slice(0, -DATA_B64_EMPTY_TAIL.length)}"data_b64":"${n.fromByteArray(sealed)}"}`;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -304,25 +307,31 @@ function parseEnvelope(text: string): EncryptedBackupEnvelope {
  * `env.data_b64` é zerado assim que vira bytes (libera a cópia de dezenas de MB).
  */
 export async function decryptBackupText(text: string, passphrase: string): Promise<unknown> {
+  if (text.length > MAX_BACKUP_BYTES) throw new Error(FILE_TOO_BIG_MESSAGE); // antes de parsear/derivar
   const env = parseEnvelope(text);
-  const salt = base64ToBytes(env.kdf.salt_b64);
-  const nonce = base64ToBytes(env.cipher.nonce_b64);
+  const n = loadNativeCrypto();
+  const salt = base64ToBytes(n, env.kdf.salt_b64);
+  const nonce = base64ToBytes(n, env.cipher.nonce_b64);
   if (salt.length !== SALT_BYTES || nonce.length !== NONCE_BYTES) {
     throw new Error('Arquivo de backup incompleto ou corrompido.');
   }
   const aad = buildAad(env.exportedAt, env.stats, env.kdf, env.cipher.nonce_b64);
-  const ciphertext = base64ToBytes(env.data_b64);
+  // `sealed`/`plain` (dezenas de MB cada) são soltos assim que deixam de ser usados: a referência
+  // some antes do JSON.parse, que é onde o pico de memória acontece.
+  let sealed: Uint8Array | null = base64ToBytes(n, env.data_b64);
   env.data_b64 = '';
+  if (sealed.length < GCM_TAG_BYTES) throw new Error('Arquivo de backup incompleto ou corrompido.');
 
-  const key = await deriveKey(passphrase, salt, env.kdf.N);
-  let plain: Uint8Array;
+  const key = await deriveKey(n, passphrase, salt, env.kdf.N);
+  let plain: Uint8Array | null;
   try {
-    plain = gcm(key, nonce, aad).decrypt(ciphertext);
+    plain = gcmDecrypt(n, key, nonce, sealed, aad);
   } catch {
     throw new BackupPassphraseError();
   } finally {
     key.fill(0);
-    ciphertext.fill(0);
+    sealed.fill(0);
+    sealed = null;
   }
   if (plain.length > MAX_BACKUP_BYTES) {
     plain.fill(0);
@@ -330,9 +339,12 @@ export async function decryptBackupText(text: string, passphrase: string): Promi
   }
   let json: string;
   try {
-    json = decodeUtf8Chunked(plain);
+    json = decodeUtf8Strict(n, plain); // UTF-8 estrito, nativo (sem TextDecoder em JS)
+  } catch {
+    throw new Error('Conteúdo do backup corrompido.');
   } finally {
     plain.fill(0);
+    plain = null;
   }
   try {
     return JSON.parse(json);
@@ -504,7 +516,7 @@ export async function pickBackupFile(): Promise<PickedBackup | null> {
     let size = asset.size;
     if (typeof size !== 'number') size = new File(asset.uri).size;
     if (typeof size === 'number' && size > MAX_BACKUP_BYTES) {
-      throw new Error('O arquivo tem mais de 50 MB e não é um backup válido.');
+      throw new Error(FILE_TOO_BIG_MESSAGE);
     }
   } catch (err) {
     discardPickedFile(asset.uri);
@@ -630,9 +642,8 @@ export async function restoreBackup(uri: string, passphrase: string): Promise<Re
   try {
     const file = new File(uri);
     if (!file.exists) throw new Error('Arquivo não encontrado.');
-    if (file.size > MAX_BACKUP_BYTES) throw new Error('O arquivo tem mais de 50 MB e não é um backup válido.');
+    if (file.size > MAX_BACKUP_BYTES) throw new Error(FILE_TOO_BIG_MESSAGE); // antes de ler/derivar
     const text = await file.text();
-    if (text.length > MAX_BACKUP_BYTES) throw new Error('O arquivo tem mais de 50 MB e não é um backup válido.');
 
     const parsed = await decryptBackupText(text, passphrase);
     if (!isRecord(parsed) || parsed.version !== BACKUP_VERSION || parsed.app !== 'voice-ai-recorder') {

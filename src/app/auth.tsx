@@ -171,6 +171,7 @@ export default function AuthScreen() {
           justifyContent="center"
           gap="$2"
           mt="$2"
+          minHeight={48}
         >
           {loading ? <ActivityIndicator color={c.textOnAccent} /> : cur.icon}
           {!loading && (
@@ -191,7 +192,11 @@ export default function AuthScreen() {
       <YStack f={1} bg={c.bgScreen} p="$4" gap="$3">
         <XStack alignItems="center" gap="$3" mt="$6">
           <Link href="/settings" asChild>
-            <Pressable accessibilityRole="button" accessibilityLabel="Voltar para Configurações">
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Voltar para Configurações"
+              style={{ minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' }}
+            >
               <ArrowLeft size={28} color={c.primary} />
             </Pressable>
           </Link>
@@ -284,6 +289,7 @@ export default function AuthScreen() {
             <>
               <Pressable
                 onPress={() => setMode('otp_send')}
+                style={{ minHeight: 48, justifyContent: 'center' }}
                 disabled={loading}
                 accessibilityRole="button"
                 accessibilityLabel="Esqueci minha senha"
@@ -295,6 +301,7 @@ export default function AuthScreen() {
               </Pressable>
               <Pressable
                 onPress={() => setMode('signup')}
+                style={{ minHeight: 48, justifyContent: 'center' }}
                 disabled={loading}
                 accessibilityRole="button"
                 accessibilityLabel="Criar nova conta"
@@ -309,6 +316,7 @@ export default function AuthScreen() {
           {mode === 'signup' && (
             <Pressable
               onPress={() => setMode('signin')}
+              style={{ minHeight: 48, justifyContent: 'center' }}
               disabled={loading}
               accessibilityRole="button"
               accessibilityLabel="Já tenho conta — fazer login"
@@ -325,6 +333,7 @@ export default function AuthScreen() {
                 setMode('signin');
                 setOtpCode('');
               }}
+              style={{ minHeight: 48, justifyContent: 'center' }}
               disabled={loading}
               accessibilityRole="button"
               accessibilityLabel="Voltar para o login"
