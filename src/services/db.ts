@@ -43,21 +43,31 @@ export const getDb = async (): Promise<SQLite.SQLiteDatabase> => {
   if (!dbPromise) {
     dbPromise = (async () => {
       const db = await SQLite.openDatabaseAsync(DB_NAME);
-      await db.execAsync(`
-        PRAGMA journal_mode = WAL;
-        CREATE TABLE IF NOT EXISTS recordings (
-          fileName TEXT PRIMARY KEY,
-          customName TEXT,
-          transcript TEXT,
-          summary TEXT,
-          templateId TEXT,
-          patientName TEXT,
-          updatedAt TEXT
-        );
-      `);
-      await runMigrations(db);
-      return db;
-    })();
+      try {
+        await db.execAsync(`
+          PRAGMA journal_mode = WAL;
+          PRAGMA secure_delete = ON;
+          CREATE TABLE IF NOT EXISTS recordings (
+            fileName TEXT PRIMARY KEY,
+            customName TEXT,
+            transcript TEXT,
+            summary TEXT,
+            templateId TEXT,
+            patientName TEXT,
+            updatedAt TEXT
+          );
+        `);
+        await runMigrations(db);
+        return db;
+      } catch (err) {
+        await db.closeAsync().catch(() => {});
+        throw err;
+      }
+    })().catch((err) => {
+      // Não cacheia a rejeição: a próxima chamada de getDb() tenta de novo.
+      dbPromise = null;
+      throw err;
+    });
   }
   return dbPromise;
 };
@@ -92,7 +102,14 @@ async function runMigrations(db: SQLite.SQLiteDatabase) {
     } catch {
       // Coluna já existe (CREATE TABLE acima já cria em DBs novos)
     }
-    await populatePatientNames(db);
+    try {
+      await populatePatientNames(db);
+    } catch (err) {
+      // Sem dados clínicos no log; user_version NÃO avança. As migrações seguintes
+      // dependem do esquema, então getDb() rejeita e tenta de novo na próxima chamada.
+      logError('DB', `Migration v3 falhou (${err instanceof Error ? err.name : 'erro'})`);
+      throw err;
+    }
     await db.execAsync('PRAGMA user_version = 3');
     logDebug('DB', 'Coluna patientName adicionada e populada');
   }
@@ -130,57 +147,147 @@ async function runMigrations(db: SQLite.SQLiteDatabase) {
     await db.execAsync('PRAGMA user_version = 6');
     logDebug('DB', 'Coluna durationSecs adicionada');
   }
-  if (currentVersion < 7) {
-    // Criptografa dados sensíveis já existentes no banco (migração one-shot)
-    const rows = await db.getAllAsync<{
-      fileName: string;
-      transcript: string | null;
-      summary: string | null;
-      patientName: string | null;
-      customName: string | null;
-    }>('SELECT fileName, transcript, summary, patientName, customName FROM recordings');
-
-    for (const r of rows) {
-      const [transcript, summary, patientName, customName] = await Promise.all([
-        r.transcript ? encryptIfNeeded(r.transcript) : null,
-        r.summary    ? encryptIfNeeded(r.summary)    : null,
-        r.patientName ? encryptIfNeeded(r.patientName) : null,
-        r.customName  ? encryptIfNeeded(r.customName)  : null,
-      ]);
-      await db.runAsync(
-        `UPDATE recordings
-           SET transcript = ?, summary = ?, patientName = ?, customName = ?
-         WHERE fileName = ?`,
-        [transcript, summary, patientName, customName, r.fileName]
-      );
-    }
-
-    await db.execAsync('PRAGMA user_version = 7');
-    logDebug('DB', `Migration v7: ${rows.length} gravações cifradas com AES-256-GCM`);
+  // v7/v8/v9 cifram dados já existentes. v9 repete v7+v8 porque builds anteriores
+  // sem crypto.subtle gravaram texto puro e mesmo assim avançaram user_version.
+  // Se uma falhar, as seguintes não rodam (versões são sequenciais) e o app segue.
+  const steps: [number, ((db: SQLite.SQLiteDatabase) => Promise<PendingUpdate[]>)[]][] = [
+    [7, [collectRecordingEncryptions]],
+    [8, [collectTemplateEncryptions]],
+    [9, [collectRecordingEncryptions, collectTemplateEncryptions]],
+  ];
+  let changed = 0;
+  for (const [version, collectors] of steps) {
+    if (currentVersion >= version) continue;
+    const n = await runEncryptionMigration(db, version, collectors);
+    if (n === null) break;
+    changed += n;
   }
-  if (currentVersion < 8) {
-    // Criptografa campos sensíveis dos templates customizados (name, description, systemPrompt)
-    const tmplRows = await db.getAllAsync<{
-      id: string;
-      name: string | null;
-      description: string | null;
-      systemPrompt: string | null;
-    }>('SELECT id, name, description, systemPrompt FROM custom_templates');
+  // Só nesta execução em que linhas realmente mudaram: remove o texto puro residual.
+  if (changed > 0) await scrubFreedPlaintext(db);
+}
 
-    for (const t of tmplRows) {
-      const [name, description, systemPrompt] = await Promise.all([
-        t.name        ? encryptIfNeeded(t.name)        : Promise.resolve(null),
-        t.description ? encryptIfNeeded(t.description) : Promise.resolve(null),
-        t.systemPrompt ? encryptIfNeeded(t.systemPrompt) : Promise.resolve(null),
-      ]);
-      await db.runAsync(
-        'UPDATE custom_templates SET name = ?, description = ?, systemPrompt = ? WHERE id = ?',
-        [name, description, systemPrompt, t.id]
-      );
+// ─── Migrações de criptografia (v7/v8/v9) ────────────────────────────────────
+
+interface PendingUpdate {
+  sql: string;
+  params: (string | null)[];
+}
+
+// Valores vazios/nulos ficam como estão; os demais são cifrados se ainda não tiverem "enc1:".
+const encIfPresent = (v: string | null): Promise<string | null> =>
+  v ? encryptIfNeeded(v) : Promise.resolve(v);
+
+async function collectRecordingEncryptions(db: SQLite.SQLiteDatabase): Promise<PendingUpdate[]> {
+  const rows = await db.getAllAsync<{
+    fileName: string;
+    transcript: string | null;
+    summary: string | null;
+    patientName: string | null;
+    customName: string | null;
+  }>('SELECT fileName, transcript, summary, patientName, customName FROM recordings');
+
+  const updates: PendingUpdate[] = [];
+  for (const r of rows) {
+    const [transcript, summary, patientName, customName] = await Promise.all([
+      encIfPresent(r.transcript),
+      encIfPresent(r.summary),
+      encIfPresent(r.patientName),
+      encIfPresent(r.customName),
+    ]);
+    if (
+      transcript === r.transcript &&
+      summary === r.summary &&
+      patientName === r.patientName &&
+      customName === r.customName
+    ) {
+      continue; // já cifrada — intocada
     }
+    updates.push({
+      sql: `UPDATE recordings
+              SET transcript = ?, summary = ?, patientName = ?, customName = ?
+            WHERE fileName = ?`,
+      params: [transcript, summary, patientName, customName, r.fileName],
+    });
+  }
+  return updates;
+}
 
-    await db.execAsync('PRAGMA user_version = 8');
-    logDebug('DB', `Migration v8: ${tmplRows.length} templates cifrados com AES-256-GCM`);
+async function collectTemplateEncryptions(db: SQLite.SQLiteDatabase): Promise<PendingUpdate[]> {
+  const rows = await db.getAllAsync<{
+    id: string;
+    name: string | null;
+    description: string | null;
+    systemPrompt: string | null;
+  }>('SELECT id, name, description, systemPrompt FROM custom_templates');
+
+  const updates: PendingUpdate[] = [];
+  for (const t of rows) {
+    const [name, description, systemPrompt] = await Promise.all([
+      encIfPresent(t.name),
+      encIfPresent(t.description),
+      encIfPresent(t.systemPrompt),
+    ]);
+    if (name === t.name && description === t.description && systemPrompt === t.systemPrompt) {
+      continue;
+    }
+    updates.push({
+      sql: 'UPDATE custom_templates SET name = ?, description = ?, systemPrompt = ? WHERE id = ?',
+      params: [name, description, systemPrompt, t.id],
+    });
+  }
+  return updates;
+}
+
+/**
+ * Executa uma migração de criptografia de forma atômica: cifra tudo em memória
+ * primeiro (qualquer falha de encrypt aborta antes de tocar no banco) e então
+ * aplica os UPDATEs + `PRAGMA user_version` numa única transação.
+ * Em falha: loga SEM dados clínicos, NÃO avança user_version (repete no próximo
+ * launch) e retorna false — o app continua com os valores atuais (texto puro
+ * legado continua legível por decrypt()).
+ *
+ * Retorna quantas linhas foram alteradas, ou null se a migração falhou.
+ */
+async function runEncryptionMigration(
+  db: SQLite.SQLiteDatabase,
+  version: number,
+  collectors: ((db: SQLite.SQLiteDatabase) => Promise<PendingUpdate[]>)[]
+): Promise<number | null> {
+  try {
+    const pending: PendingUpdate[] = [];
+    for (const collect of collectors) pending.push(...(await collect(db)));
+
+    await db.withTransactionAsync(async () => {
+      for (const u of pending) await db.runAsync(u.sql, u.params);
+      await db.execAsync(`PRAGMA user_version = ${version}`);
+    });
+    logDebug('DB', `Migration v${version}: ${pending.length} linhas cifradas com AES-256-GCM`);
+    return pending.length;
+  } catch (err) {
+    logError(
+      'DB',
+      `Migration v${version} falhou e será repetida na próxima abertura (${
+        err instanceof Error ? err.name : 'erro'
+      })`
+    );
+    return null;
+  }
+}
+
+/**
+ * Best-effort, fora da transação de migração: o texto puro antigo ainda existe
+ * em páginas livres/WAL. checkpoint(TRUNCATE) + VACUUM reescrevem o arquivo
+ * (secure_delete=ON já zera páginas liberadas). Erros são logados sem PHI e
+ * nunca falham getDb().
+ */
+async function scrubFreedPlaintext(db: SQLite.SQLiteDatabase): Promise<void> {
+  try {
+    await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE)');
+    await db.execAsync('VACUUM');
+    await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE)');
+    logDebug('DB', 'Texto puro legado removido do arquivo (checkpoint + VACUUM)');
+  } catch (err) {
+    logError('DB', `Limpeza pós-migração (VACUUM) falhou (${err instanceof Error ? err.name : 'erro'})`);
   }
 }
 

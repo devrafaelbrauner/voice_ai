@@ -45,6 +45,16 @@ function setStatus(s: SyncStatus) {
 
 // ─── PUSH ────────────────────────────────────────────────────
 
+/** Cifra se ainda não estiver cifrado; vazio/nulo passa como está. */
+const encField = (v: string | null): Promise<string | null> =>
+  v ? encryptIfNeeded(v) : Promise.resolve(v);
+
+/** Loga SEM dados clínicos e devolve o erro que aborta o push da tabela (nada é enviado). */
+function pushEncryptFailed(table: string, err: unknown): Error {
+  logError('sync', `push ${table} abortado: falha ao cifrar (${err instanceof Error ? err.name : 'erro'})`);
+  return new Error('Falha ao cifrar dados para sincronização; envio cancelado.');
+}
+
 /**
  * Envia os metadados das gravações para o Supabase com os campos sensíveis
  * já cifrados (enc1:...) — o servidor nunca recebe PHI em texto puro.
@@ -56,23 +66,34 @@ async function pushRecordings(userId: string): Promise<number> {
   // Raw = valores com prefixo enc1:... (ou texto puro legado) sem decifrar
   const meta = await getAllRecordingsMetaRaw();
   const rows = [];
-  for (const [fileName, m] of meta.entries()) {
-    const match = fileName.match(/recording_(\d+)\.m4a/);
-    const createdAt = match
-      ? new Date(parseInt(match[1])).toISOString()
-      : new Date().toISOString();
-    rows.push({
-      user_id: userId,
-      file_name: fileName,
-      // Campos sensíveis chegam já cifrados — Supabase armazena enc1:...
-      custom_name: m.customName,
-      transcript: m.transcript,
-      summary: m.summary,
-      template_id: m.templateId,
-      patient_name: m.patientName,
-      created_at: createdAt,
-      updated_at: m.updatedAt ?? createdAt,
-    });
+  try {
+    for (const [fileName, m] of meta.entries()) {
+      const match = fileName.match(/recording_(\d+)\.m4a/);
+      const createdAt = match
+        ? new Date(parseInt(match[1])).toISOString()
+        : new Date().toISOString();
+      // Guard fail-closed: encryptIfNeeded logo antes de montar o payload — nunca
+      // envia texto puro, mesmo se a migração v9 falhou. Já cifrados passam intactos.
+      const [customName, transcript, summary, patientName] = await Promise.all([
+        encField(m.customName),
+        encField(m.transcript),
+        encField(m.summary),
+        encField(m.patientName),
+      ]);
+      rows.push({
+        user_id: userId,
+        file_name: fileName,
+        custom_name: customName,
+        transcript,
+        summary,
+        template_id: m.templateId,
+        patient_name: patientName,
+        created_at: createdAt,
+        updated_at: m.updatedAt ?? createdAt,
+      });
+    }
+  } catch (err) {
+    throw pushEncryptFailed('recordings', err);
   }
   if (rows.length === 0) return 0;
   const { error } = await supabase
@@ -86,14 +107,22 @@ async function pushTemplates(userId: string): Promise<number> {
   // Raw = valores com prefixo enc1:... sem decifrar (Supabase armazena ciphertext)
   const templates = await getCustomTemplatesRaw();
   if (templates.length === 0) return 0;
-  const rows = templates.map((t) => ({
-    user_id: userId,
-    id: t.id,
-    name: t.name,
-    description: t.description,
-    system_prompt: t.systemPrompt,
-    created_at: t.createdAt,
-  }));
+  let rows;
+  try {
+    rows = await Promise.all(
+      templates.map(async (t) => ({
+        user_id: userId,
+        id: t.id,
+        // Guard fail-closed: nunca envia texto puro, mesmo se a migração v9 falhou.
+        name: await encField(t.name),
+        description: await encField(t.description),
+        system_prompt: await encField(t.systemPrompt),
+        created_at: t.createdAt,
+      }))
+    );
+  } catch (err) {
+    throw pushEncryptFailed('templates', err);
+  }
   const { error } = await supabase
     .from('custom_templates')
     .upsert(rows, { onConflict: 'user_id,id' });

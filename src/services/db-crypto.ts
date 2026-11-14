@@ -2,71 +2,38 @@
  * db-crypto.ts — Criptografia AES-256-GCM para campos sensíveis do SQLite
  *
  * Estratégia:
- *   - Usa Web Crypto API (crypto.subtle) quando disponível no runtime.
- *   - Em ambientes sem suporte (Hermes antigo / Android sem polyfill),
- *     faz graceful fallback: dados são armazenados/lidos em texto puro,
- *     sem crash. Instale react-native-quick-crypto para ativar criptografia.
+ *   - AES-256-GCM em JS puro via @noble/ciphers (auditado, sem módulo nativo).
+ *     Hermes/React Native não expõe crypto.subtle, então WebCrypto não é usado.
+ *   - Aleatoriedade (chave de 32 bytes, IV de 12 bytes) vem de expo-crypto
+ *     (CSPRNG do sistema operacional) — nunca Math.random.
  *   - A chave AES é gerada uma vez e armazenada no expo-secure-store
- *     (iOS Keychain / Android Keystore — hardware-backed em dispositivos modernos).
+ *     (iOS Keychain / Android Keystore — hardware-backed em dispositivos modernos)
+ *     como base64 de 32 bytes brutos.
  *   - Cada campo sensível é cifrado individualmente com IV único (12 bytes).
- *   - Formato no banco: "enc1:<iv_base64>:<ciphertext_base64>"
+ *   - Formato no banco: "enc1:<iv_base64>:<ciphertext||tag_base64>"
+ *     (mesmo layout do WebCrypto AES-GCM: tag de 16 bytes ao final).
  *   - Valores sem prefixo "enc1:" são tratados como legado (pré-criptografia)
  *     e retornados como texto puro sem erro — compatível com migração v7.
+ *   - FAIL CLOSED: encrypt() lança erro se a chave, o RNG ou a cifra falharem;
+ *     nunca devolve o texto puro como se estivesse cifrado.
  *
  * Campos protegidos: transcript, summary, patientName, customName
  * Campos NÃO protegidos (metadados): fileName, templateId, durationSecs, updatedAt
  */
 
 import * as SecureStore from 'expo-secure-store';
-import { logDebug, logWarn } from './log';
+import { getRandomValues } from 'expo-crypto';
+import { gcm } from '@noble/ciphers/aes.js';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { logWarn } from './log';
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
 const KEY_STORE_KEY = 'db_aes_key_v1';
 const ENC_PREFIX = 'enc1:';
-
-// ─── Detecção de suporte ao Web Crypto API ────────────────────────────────────
-
-/**
- * Retorna true se crypto.subtle estiver disponível neste runtime.
- * Hermes antigo (RN < 0.71) e alguns builds Android não têm crypto.subtle.
- * Nesse caso o módulo opera em modo "sem criptografia" sem lançar exceções.
- */
-function hasCryptoSubtle(): boolean {
-  try {
-    return (
-      typeof globalThis !== 'undefined' &&
-      typeof (globalThis as any).crypto !== 'undefined' &&
-      typeof (globalThis as any).crypto.subtle !== 'undefined'
-    );
-  } catch {
-    return false;
-  }
-}
-
-function getCrypto(): Crypto {
-  return (globalThis as any).crypto as Crypto;
-}
-
-// ─── Cache em memória da CryptoKey (evita round-trip ao SecureStore a cada op) ─
-
-let cachedKey: CryptoKey | null = null;
-let cryptoAvailable: boolean | null = null; // cached após primeira verificação
-
-function isCryptoAvailable(): boolean {
-  if (cryptoAvailable === null) {
-    cryptoAvailable = hasCryptoSubtle();
-    if (!cryptoAvailable) {
-      logWarn(
-        'db-crypto',
-        'crypto.subtle não disponível neste runtime. ' +
-        'Dados serão armazenados sem criptografia. ' +
-        'Instale react-native-quick-crypto para habilitar AES-256-GCM.'
-      );
-    }
-  }
-  return cryptoAvailable;
-}
+const KEY_BYTES = 32;
+const IV_BYTES = 12;
+const KEY_MARKER_KEY = 'db_aes_key_created_v1';
 
 // ─── Helpers base64 ──────────────────────────────────────────────────────────
 
@@ -89,88 +56,94 @@ function base64ToUint8(b64: string): Uint8Array {
 
 // ─── Gerenciamento de chave ───────────────────────────────────────────────────
 
+/** Promise compartilhada (single-flight) — evita gerar duas chaves em chamadas concorrentes. */
+let keyPromise: Promise<Uint8Array> | null = null;
+
 /**
- * Obtém (ou gera) a chave AES-256-GCM do SecureStore.
- * A chave é cacheada em memória para evitar I/O repetitivo.
- * Lança erro se crypto.subtle não estiver disponível.
+ * A chave AES foi criada anteriormente neste dispositivo (marcador presente),
+ * mas o SecureStore não a devolve mais (backup restaurado, Keystore resetado...).
+ * Gerar outra chave orfanaria todos os dados cifrados, então nunca regeneramos.
  */
-export async function getOrCreateKey(): Promise<CryptoKey> {
-  if (cachedKey) return cachedKey;
-
-  const subtle = getCrypto().subtle;
-  let keyB64 = await SecureStore.getItemAsync(KEY_STORE_KEY);
-
-  if (!keyB64) {
-    // Primeira execução: gera chave nova
-    const key = await subtle.generateKey(
-      { name: 'AES-GCM', length: 256 },
-      true,
-      ['encrypt', 'decrypt']
+export class KeyLostError extends Error {
+  constructor() {
+    super(
+      'A chave de criptografia deste dispositivo foi perdida. ' +
+      'Os dados armazenados neste dispositivo e já sincronizados não podem mais ser lidos. ' +
+      'Novas gravações não podem ser salvas até que os dados do app sejam apagados (reinstalar o app ou limpar os dados).'
     );
-    const exported = await subtle.exportKey('raw', key);
-    keyB64 = uint8ToBase64(new Uint8Array(exported));
-    await SecureStore.setItemAsync(KEY_STORE_KEY, keyB64);
-    cachedKey = key;
-    return key;
+    this.name = 'KeyLostError';
+    Object.setPrototypeOf(this, KeyLostError.prototype);
+  }
+}
+
+async function loadOrCreateKey(): Promise<Uint8Array> {
+  const keyB64 = await SecureStore.getItemAsync(KEY_STORE_KEY);
+
+  if (keyB64) {
+    const keyBytes = base64ToUint8(keyB64);
+    if (keyBytes.length !== KEY_BYTES) {
+      // Nunca regenerar silenciosamente: isso orfanaria todos os dados já cifrados.
+      throw new Error(
+        `Chave de criptografia armazenada inválida (${keyBytes.length} bytes, esperado ${KEY_BYTES}).`
+      );
+    }
+    // Instalações anteriores ao marcador: registra (best-effort) que a chave existe.
+    AsyncStorage.setItem(KEY_MARKER_KEY, '1').catch(() => {});
+    return keyBytes;
   }
 
-  const keyBytes = base64ToUint8(keyB64);
-  // Slice cria um ArrayBuffer puro (sem SharedArrayBuffer) — necessário para crypto.subtle
-  const keyBuffer = keyBytes.buffer.slice(
-    keyBytes.byteOffset,
-    keyBytes.byteOffset + keyBytes.byteLength
-  ) as ArrayBuffer;
-  const key = await subtle.importKey(
-    'raw',
-    keyBuffer,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt']
-  );
-  cachedKey = key;
+  // Sem chave no SecureStore: só é legítimo criar se nunca criamos antes.
+  // Se a leitura do marcador falhar, propaga (fail closed).
+  if ((await AsyncStorage.getItem(KEY_MARKER_KEY)) !== null) {
+    throw new KeyLostError();
+  }
+
+  // Primeira execução: gera chave nova e persiste antes de usá-la.
+  const key = getRandomValues(new Uint8Array(KEY_BYTES));
+  await SecureStore.setItemAsync(KEY_STORE_KEY, uint8ToBase64(key));
+  // Marcador só após a chave estar persistida. Se falhar, propaga: a chave já
+  // persistida será reutilizada na próxima chamada (nenhum dado foi cifrado com ela).
+  await AsyncStorage.setItem(KEY_MARKER_KEY, '1');
   return key;
+}
+
+/**
+ * Obtém (ou gera) a chave AES-256 do SecureStore.
+ * A chave é cacheada em memória (via promise) para evitar I/O repetitivo e
+ * garantir uma única geração mesmo com chamadas concorrentes.
+ * Em caso de falha a promise é descartada e a próxima chamada tenta de novo.
+ */
+function getKey(): Promise<Uint8Array> {
+  if (!keyPromise) {
+    keyPromise = loadOrCreateKey().catch((err) => {
+      keyPromise = null;
+      throw err;
+    });
+  }
+  return keyPromise;
 }
 
 // ─── Encrypt / Decrypt ────────────────────────────────────────────────────────
 
 /**
  * Cifra uma string com AES-256-GCM.
- * Retorna "enc1:<iv_b64>:<ciphertext_b64>".
- * Se crypto.subtle não estiver disponível, retorna o texto puro sem cifrar.
+ * Retorna "enc1:<iv_b64>:<ciphertext||tag_b64>".
+ * Lança erro (fail closed) se chave, RNG ou cifra falharem — nunca retorna texto puro.
  */
 export async function encrypt(plaintext: string): Promise<string> {
-  if (!isCryptoAvailable()) {
-    // Fallback: armazena texto puro. Sem crash, sem perda de dados.
-    return plaintext;
-  }
-
-  // Protege todo o caminho — se qualquer API de crypto falhar no runtime,
-  // armazena texto puro em vez de propagar exceção (que poderia crashar a UI).
-  try {
-    const subtle = getCrypto().subtle;
-    const key = await getOrCreateKey();
-    const iv = getCrypto().getRandomValues(new Uint8Array(12));
-    const encoded = new TextEncoder().encode(plaintext);
-
-    const ciphertext = await subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
-
-    const ivB64 = uint8ToBase64(iv);
-    const ctB64 = uint8ToBase64(new Uint8Array(ciphertext));
-    logDebug('db-crypto', 'encrypt OK, iv.len=12, ct.len=', new Uint8Array(ciphertext).length);
-    return `${ENC_PREFIX}${ivB64}:${ctB64}`;
-  } catch {
-    logWarn('db-crypto', 'encrypt: falha de crypto no runtime — armazenando texto puro.');
-    return plaintext;
-  }
+  const key = await getKey();
+  const iv = getRandomValues(new Uint8Array(IV_BYTES));
+  const ciphertext = gcm(key, iv).encrypt(new TextEncoder().encode(plaintext));
+  return `${ENC_PREFIX}${uint8ToBase64(iv)}:${uint8ToBase64(ciphertext)}`;
 }
 
 /**
  * Decifra um valor armazenado.
  * - Se o valor começa com "enc1:" → decifra com AES-GCM.
  * - Caso contrário → retorna como texto puro (legado pré-migração v7).
- * - Se crypto.subtle não estiver disponível e o valor for cifrado, retorna vazio.
  * - Se a chave for diferente da que cifrou o dado (ex.: sync cross-device),
- *   retorna vazio com log — evita crash e não expõe ciphertext.
+ *   ou o dado estiver corrompido, retorna DECRYPT_FAILED_SENTINEL com log —
+ *   evita crash e não expõe ciphertext.
  */
 export async function decrypt(stored: string): Promise<string> {
   if (!stored.startsWith(ENC_PREFIX)) {
@@ -178,18 +151,9 @@ export async function decrypt(stored: string): Promise<string> {
     return stored;
   }
 
-  if (!isCryptoAvailable()) {
-    // Não consegue decifrar sem crypto.subtle.
-    // Retorna string vazia para não expor dados cifrados ilegíveis.
-    logWarn('db-crypto', 'decrypt: crypto.subtle indisponível, retornando vazio');
-    return '';
-  }
-
-  // Corpo inteiro protegido — NENHUM caminho pode lançar (atob, importKey,
-  // decode, etc.). Uma exceção aqui propagaria pela leitura do DB e poderia
-  // crashar a tela; preferimos retornar vazio e logar.
+  // Corpo inteiro protegido — NENHUM caminho pode lançar (atob, decode, etc.).
+  // Uma exceção aqui propagaria pela leitura do DB e poderia crashar a tela.
   try {
-    const subtle = getCrypto().subtle;
     const rest = stored.slice(ENC_PREFIX.length);
     const colonIdx = rest.indexOf(':');
     if (colonIdx === -1) {
@@ -197,26 +161,20 @@ export async function decrypt(stored: string): Promise<string> {
       return stored;
     }
 
-    const ivB64 = rest.slice(0, colonIdx);
-    const ctB64 = rest.slice(colonIdx + 1);
-    const ivRaw = base64ToUint8(ivB64);
-    const ctRaw = base64ToUint8(ctB64);
+    const iv = base64ToUint8(rest.slice(0, colonIdx));
+    const ct = base64ToUint8(rest.slice(colonIdx + 1));
 
-    // Slice cria ArrayBuffer puro para compatibilidade com crypto.subtle
-    const iv = ivRaw.buffer.slice(ivRaw.byteOffset, ivRaw.byteOffset + ivRaw.byteLength) as ArrayBuffer;
-    const ct = ctRaw.buffer.slice(ctRaw.byteOffset, ctRaw.byteOffset + ctRaw.byteLength) as ArrayBuffer;
-
-    const key = await getOrCreateKey();
-    const decrypted = await subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+    const key = await getKey();
+    const decrypted = gcm(key, iv).decrypt(ct);
     return new TextDecoder().decode(decrypted);
   } catch {
     // Seg #1: falha de decriptação — chave errada (dado cifrado em outro dispositivo),
-    // dado corrompido, ou API de crypto indisponível/parcial no runtime.
+    // dado corrompido ou chave local indisponível/inválida.
     // Retorna sentinel visível em vez de string vazia silenciosa, para que a
     // UI possa exibir um aviso ao médico em vez de mostrar campo em branco.
     logWarn(
       'db-crypto',
-      'decrypt: falha (chave de outro dispositivo, dado corrompido ou crypto indisponível).'
+      'decrypt: falha (chave de outro dispositivo, dado corrompido ou chave indisponível).'
     );
     return DECRYPT_FAILED_SENTINEL;
   }

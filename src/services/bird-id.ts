@@ -25,13 +25,17 @@
 //   POST /v0/pades/sign       — assina um PDF (PAdES) com o certificado
 //
 // NOTA: Se os endpoints mudarem, atualize BIRD_ID_BASE e os paths abaixo.
+//       A saída assinada NÃO é validada criptograficamente: apenas conferimos
+//       que os bytes começam com %PDF e contêm /ByteRange [0 n m k] numérico e
+//       /Contents <hex> não vazio. O formato real da API (campos/endpoint) ainda
+//       precisa ser confirmado com o fornecedor.
 
 import * as SecureStore from 'expo-secure-store';
 import * as FileSystem from 'expo-file-system/legacy';
 
 // ── Constantes ──────────────────────────────────────────────────────────────
-const TOKEN_KEY     = '@voice_ai/bird_id_session_token/v1';
-const META_KEY      = '@voice_ai/bird_id_session_meta/v1';
+const TOKEN_KEY     = 'voice_ai.bird_id_session_token.v1';
+const META_KEY      = 'voice_ai.bird_id_session_meta.v1';
 export const BIRD_ID_BASE = 'https://api.birdid.com.br/v0';
 
 // ── Tipos ────────────────────────────────────────────────────────────────────
@@ -274,6 +278,10 @@ export async function signPdfWithBirdId(
     }
   }
 
+  // 3b. Sanidade: só compartilhar se parecer um PDF realmente assinado.
+  //     Um PDF sem /ByteRange ou /Sig (ex.: eco do original) NÃO é assinado.
+  assertLooksLikeSignedPdf(signedBase64);
+
   // 4. Gravar o PDF assinado no cacheDirectory do app
   const safeDir = FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? '';
   const outPath = `${safeDir}evopad_signed_${Date.now()}.pdf`;
@@ -282,6 +290,39 @@ export async function signPdfWithBirdId(
   });
 
   return { uri: outPath };
+}
+
+/**
+ * Verifica (heuristicamente) que o conteúdo base64 é um PDF com um dicionário de
+ * assinatura: cabeçalho `%PDF`, `/ByteRange [0 n m k]` numérico e `/Contents <hex>`
+ * não vazio (nem só zeros). Um campo de assinatura vazio (/FT /Sig, /SigFlags)
+ * NÃO passa. Lança erro em português se algo faltar.
+ * NOTA: isto NÃO valida a assinatura criptográfica — apenas evita compartilhar
+ * como "assinado" um arquivo que claramente não foi assinado.
+ */
+function assertLooksLikeSignedPdf(base64: string): void {
+  let binary: string;
+  try {
+    binary = atob(base64);
+  } catch {
+    throw new Error('O Bird ID retornou um conteúdo inválido (base64 malformado). O arquivo não foi compartilhado.');
+  }
+  if (!binary.startsWith('%PDF')) {
+    throw new Error('O Bird ID não retornou um PDF válido. O arquivo não foi compartilhado.');
+  }
+  const byteRange = /\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]/.exec(binary);
+  const contents = /\/Contents\s*<([0-9A-Fa-f\s]*)>/.exec(binary);
+  const hasSignature =
+    byteRange !== null &&
+    Number(byteRange[1]) === 0 &&
+    Number(byteRange[3]) > 0 &&
+    contents !== null &&
+    /[1-9A-Fa-f]/.test(contents[1]);
+  if (!hasSignature) {
+    throw new Error(
+      'O PDF retornado pelo Bird ID não contém assinatura digital. O arquivo não foi compartilhado.'
+    );
+  }
 }
 
 // ── Utilitários ──────────────────────────────────────────────────────────────
