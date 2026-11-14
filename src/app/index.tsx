@@ -209,7 +209,7 @@ export default function RecordScreen() {
         )}
 
         {isRecording && (
-          <XStack gap="$3" alignItems="center">
+          <XStack gap="$3" alignItems="center" justifyContent="center" flexWrap="wrap">
             <Pressable
               onPress={isPaused ? resumeRecording : pauseRecording}
               style={{ minHeight: 48, justifyContent: 'center' }}

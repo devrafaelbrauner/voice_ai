@@ -122,7 +122,9 @@ export default function PatientsScreen() {
           <TextInput
             style={{
               flex: 1,
-              padding: 12,
+              paddingHorizontal: 12,
+              paddingVertical: 12,
+              minHeight: 48,
               fontSize: 14,
               color: c.text,
             }}
