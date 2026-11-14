@@ -11,6 +11,13 @@
 - Mermaid: escape de `</script>`, script fixado em 10.9.8 com SRI, CSP com nonce, navegação bloqueada, sem janelas extras.
 - **Requer novo binário nativo** (`expo-crypto`); não há OTA.
 
+### Slice C — ciclo de vida de dados e motor de transcrição
+- Exclusões: tombstones locais (`pending_deletions`, migration v10, triggers AFTER DELETE); sync faz flush verificado antes do pull e nunca ressuscita item excluído; mutex de sync com watchdog de 25 s; `professionalEnabled` faz round-trip com flag de alteração pendente.
+- Backup v2 cifrado com passphrase (scrypt N=2^14 + AES-GCM, cabeçalho como AAD, limite 50 MB) e restore transacional via `expo-document-picker`; resumo da Config por `COUNT(*)` em SQL; exports em `cache/exports` com sweep. Backup v1 em texto puro não é mais aceito.
+- Motor de transcrição (referência: FlowVoice): `TranscriptionError` tipado por status HTTP, retry com backoff e `Retry-After`, cadeia de recuo sempre no mesmo provedor, checagem de sanidade do texto. Fila por `fileName` com cooldown, para em rede/rate limit/chave/cota e nunca perde o áudio; drain único (store) também ao voltar ao primeiro plano.
+- Gravação excluída durante transcrição/IA não é recriada (`updateFieldIfExists`).
+- **Requer novo binário nativo** (`expo-document-picker`) e a migration Supabase com `doctor_profiles.professional_enabled`.
+
 ### Corrigido
 - Edge Functions `openai-chat` e `openai-transcribe`: `json()` referenciava `corsHeaders` fora de escopo (ReferenceError em toda resposta de erro).
 - `gpt-5.4-mini` aceito no proxy (`max_completion_tokens`, sem `temperature`); custo reportado 0 até o preço ser confirmado.

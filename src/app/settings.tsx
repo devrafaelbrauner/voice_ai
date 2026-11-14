@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { TextInput, Pressable, Alert, ScrollView, Switch, View } from 'react-native';
 import { YStack, XStack, Text } from 'tamagui';
 import {
@@ -22,6 +22,7 @@ import {
   FileText,
   Lock,
   Download,
+  Upload,
   HelpCircle,
   Link2,
   WifiOff,
@@ -33,14 +34,21 @@ import {
   X as XIcon,
   Mic,
 } from 'lucide-react-native';
-import { Link } from 'expo-router';
+import { Link, useFocusEffect } from 'expo-router';
 import { getCurrentUser, signOut, onAuthChange, updatePassword } from '../services/auth';
 import { useTheme } from '../hooks/useTheme';
 import { useColors } from '../context/ThemeContext';
 import { validatePassword, PASSWORD_REQUIREMENTS_HINT } from '../utils/password';
 import { useLGPDConsent } from '../context/LGPDConsentContext';
 import { syncNow, onSyncChange, getSyncStatus, SyncStatus } from '../services/sync';
-import { exportBackup, buildBackup, describeBackup } from '../services/backup';
+import {
+  exportBackup,
+  restoreBackup,
+  pickBackupFile,
+  discardPickedFile,
+  getBackupSummary,
+} from '../services/backup';
+import { sweepOldExports } from '../services/share';
 import type { User } from '@supabase/supabase-js';
 import {
   getApiKey,
@@ -76,6 +84,7 @@ import {
   EvoPadConfig,
 } from '../services/evopad-export';
 import { OnboardingModal } from '../components/OnboardingModal';
+import { BackupPassphraseModal } from '../components/BackupPassphraseModal';
 import { BottomTabBar } from '../components/BottomTabBar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -90,6 +99,10 @@ import {
 } from '../services/bird-id';
 
 const ONBOARDING_SEEN_KEY = '@voice_ai_recorder/onboarding_seen/v1';
+
+type BackupModalState =
+  | { mode: 'create' }
+  | { mode: 'enter'; uri: string; name: string };
 
 function SectionHeader({ label }: { label: string }) {
   const c = useColors();
@@ -156,7 +169,8 @@ export default function SettingsScreen() {
   const [forceDirect, setForceDirectState] = useState(false);
   const [openaiMode, setOpenAIMode] = useState<OpenAIMode>('direct');
   const [backupSummary, setBackupSummary] = useState<string | null>(null);
-  const [exportingBackup, setExportingBackup] = useState(false);
+  const [backupModal, setBackupModal] = useState<BackupModalState | null>(null);
+  const [pickingBackup, setPickingBackup] = useState(false);
   const [evoPadConfig, setEvoPadConfigState] = useState<EvoPadConfig>({
     baseUrl: 'http://127.0.0.1:4173',
     importToken: '',
@@ -176,12 +190,19 @@ export default function SettingsScreen() {
 
   const refreshBackupSummary = async () => {
     try {
-      const payload = await buildBackup();
-      setBackupSummary(describeBackup(payload));
+      // Contagem via SQL: montar o backup inteiro (decifrar tudo) levava ~17 s com 12 MB.
+      setBackupSummary(await getBackupSummary());
     } catch {
       setBackupSummary(null);
     }
   };
+
+  // Exports antigos em cache/exports (podem conter PHI em texto puro) são varridos ao abrir.
+  useFocusEffect(
+    useCallback(() => {
+      sweepOldExports();
+    }, [])
+  );
 
   useEffect(() => {
     getApiKey().then((k) => {
@@ -296,16 +317,56 @@ export default function SettingsScreen() {
     );
   };
 
-  const handleExportBackup = async () => {
-    setExportingBackup(true);
+  const handleExportBackup = () => setBackupModal({ mode: 'create' });
+
+  const handleRestoreBackup = async () => {
+    if (pickingBackup) return;
+    setPickingBackup(true);
     try {
-      await exportBackup();
+      const picked = await pickBackupFile();
+      if (picked) setBackupModal({ mode: 'enter', uri: picked.uri, name: picked.name });
+    } catch (err: any) {
+      Alert.alert('Arquivo inválido', err?.message ?? String(err));
     } finally {
-      setExportingBackup(false);
-      refreshBackupSummary();
+      setPickingBackup(false);
     }
   };
 
+  const closeBackupModal = () => {
+    if (backupModal?.mode === 'enter') discardPickedFile(backupModal.uri);
+    setBackupModal(null);
+  };
+
+  // Lança em falha (senha errada, arquivo inválido...): o modal mostra a mensagem e fica aberto.
+  const submitBackupPassphrase = async (passphrase: string) => {
+    const modal = backupModal;
+    if (!modal) return;
+    if (modal.mode === 'create') {
+      const out = await exportBackup(passphrase);
+      setBackupModal(null);
+      if (out.status === 'empty') {
+        Alert.alert('Nada para exportar', 'Você ainda não tem gravações nem templates no aplicativo.');
+      } else if (out.unreadable > 0) {
+        Alert.alert(
+          'Backup gerado com ressalvas',
+          `${out.unreadable} item(ns) não puderam ser lidos (dado corrompido ou cifrado em outro aparelho) e ficaram incompletos ou de fora do backup.`
+        );
+      }
+    } else {
+      const res = await restoreBackup(modal.uri, passphrase);
+      setBackupModal(null);
+      const lines = [
+        `${res.restoredRecordings} gravação(ões) e ${res.restoredTemplates} template(s) restaurados.`,
+      ];
+      if (res.alreadyPresent > 0) lines.push(`${res.alreadyPresent} item(ns) já existiam e foram mantidos.`);
+      if (res.unreadable > 0) lines.push(`${res.unreadable} item(ns) do arquivo estavam ilegíveis e foram ignorados.`);
+      if (res.doctorRestored) lines.push('Perfil profissional restaurado.');
+      lines.push('Os arquivos de áudio não fazem parte do backup.');
+      Alert.alert('Backup restaurado', lines.join('\n'));
+      getDoctorProfile().then(setDoctor);
+    }
+    refreshBackupSummary();
+  };
   // Re-evaluate the effective mode whenever auth or the force toggle changes.
   useEffect(() => {
     getOpenAIMode().then(setOpenAIMode);
@@ -605,9 +666,9 @@ export default function SettingsScreen() {
           </XStack>
 
           <Text fontSize={12} color={c.textSecondary} lineHeight={18}>
-            Gere um arquivo JSON com todas as suas gravações, transcrições,
-            resumos, dados profissionais e templates personalizados.
-            Útil para portabilidade (LGPD Art. 18) ou trocar de aparelho.
+            Gere um arquivo JSON cifrado com uma senha que só você conhece, com todas as
+            suas gravações, transcrições, resumos, dados profissionais e templates
+            personalizados. Útil para portabilidade (LGPD Art. 18) ou trocar de aparelho.
           </Text>
 
           {backupSummary && (
@@ -630,29 +691,48 @@ export default function SettingsScreen() {
 
           <Pressable
             onPress={handleExportBackup}
-            disabled={exportingBackup}
             accessibilityRole="button"
-            accessibilityLabel={exportingBackup ? 'Gerando backup…' : 'Exportar backup em JSON'}
-            accessibilityHint="Gera um arquivo com todas as gravações e dados para exportação"
-            accessibilityState={{ busy: exportingBackup, disabled: exportingBackup }}
+            accessibilityLabel="Exportar backup cifrado com senha"
+            accessibilityHint="Pede uma senha e gera um arquivo cifrado com todas as gravações e dados"
           >
             <XStack
-              bg={exportingBackup ? c.bgSubtle : c.accentBlue}
+              bg={c.accentBlue}
               borderRadius="$3"
               px="$3"
               py="$3"
               alignItems="center"
               justifyContent="center"
               gap="$2"
-              opacity={exportingBackup ? 0.6 : 1}
             >
-              <Download size={16} color={exportingBackup ? c.textSecondary : c.textOnAccent} />
-              <Text
-                fontSize={13}
-                color={exportingBackup ? c.textSecondary : c.textOnAccent}
-                fontWeight="700"
-              >
-                {exportingBackup ? 'Gerando backup…' : 'Exportar backup (JSON)'}
+              <Download size={16} color={c.textOnAccent} />
+              <Text fontSize={13} color={c.textOnAccent} fontWeight="700">
+                Exportar backup cifrado
+              </Text>
+            </XStack>
+          </Pressable>
+
+          <Pressable
+            onPress={handleRestoreBackup}
+            disabled={pickingBackup}
+            accessibilityRole="button"
+            accessibilityLabel={pickingBackup ? 'Abrindo seletor de arquivos…' : 'Restaurar backup'}
+            accessibilityHint="Escolhe um arquivo de backup e pede a senha para restaurar"
+            accessibilityState={{ busy: pickingBackup, disabled: pickingBackup }}
+          >
+            <XStack
+              borderWidth={1}
+              borderColor={c.accentBlue}
+              borderRadius="$3"
+              px="$3"
+              py="$3"
+              alignItems="center"
+              justifyContent="center"
+              gap="$2"
+              opacity={pickingBackup ? 0.6 : 1}
+            >
+              <Upload size={16} color={c.accentBlue} />
+              <Text fontSize={13} color={c.accentBlue} fontWeight="700">
+                {pickingBackup ? 'Abrindo…' : 'Restaurar backup'}
               </Text>
             </XStack>
           </Pressable>
@@ -1650,7 +1730,7 @@ export default function SettingsScreen() {
             A signature_session é um token OAuth emitido pelo Bird ID que
             permite múltiplas assinaturas ICP-Brasil enquanto estiver dentro
             do prazo de validade ou não for revogada. Obtida no portal
-            birdid.com.br com o escopo "sign". Armazenada com segurança no
+            birdid.com.br com o escopo &quot;sign&quot;. Armazenada com segurança no
             Keychain / SecureStore do dispositivo.
           </Text>
         </YStack>
@@ -1833,6 +1913,14 @@ export default function SettingsScreen() {
       <OnboardingModal
         visible={showOnboarding}
         onDismiss={() => setShowOnboarding(false)}
+      />
+
+      <BackupPassphraseModal
+        visible={backupModal !== null}
+        mode={backupModal?.mode ?? 'create'}
+        fileName={backupModal?.mode === 'enter' ? backupModal.name : undefined}
+        onSubmit={submitBackupPassphrase}
+        onClose={closeBackupModal}
       />
 
       <BottomTabBar />
