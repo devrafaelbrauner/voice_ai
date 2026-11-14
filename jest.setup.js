@@ -6,7 +6,8 @@
 //   de um banco pré-populado (ex.: esquema v9) coloca o DatabaseSync em
 //   `globalThis.__nextSqliteDb` antes de chamar getDb(); ele é consumido uma vez.
 // - expo-file-system (+ /legacy) -> FS em memória em `globalThis.__fakeFs` (uri -> string
-//   ou `{ size }` para arquivos "grandes" sem alocar memória).
+//   ou `{ size }` para arquivos "grandes" sem alocar memória). File.open() devolve um FileHandle
+//   (readBytes por offset, writeBytes sequencial) e write() aceita { append }.
 // - expo-secure-store / AsyncStorage / expo-crypto (node:crypto) / expo-document-picker.
 // Estado por registry de módulos: use jest.resetModules() entre testes para zerar.
 
@@ -127,12 +128,12 @@ jest.mock('react-native-quick-base64', () => {
   const strict = /^[A-Za-z0-9+/]*={0,2}$/;
   return {
     __esModule: true,
-    toByteArray: (b64) => {
+    toByteArray: jest.fn((b64) => {
       if (b64.length % 4 !== 0 || !strict.test(b64)) throw new Error('Input is not valid base64-encoded data');
       const b = Buffer.from(b64, 'base64');
       return new Uint8Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
-    },
-    fromByteArray: (u8) => Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength).toString('base64'),
+    }),
+    fromByteArray: jest.fn((u8) => Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength).toString('base64')),
   };
 });
 
@@ -172,8 +173,58 @@ jest.mock('expo-file-system', () => {
       if (typeof v !== 'string') throw new Error('fake file without content');
       return v;
     }
-    write(content) {
-      fs.set(this.uri, content);
+    write(content, options) {
+      const text = typeof content === 'string' ? content : Buffer.from(content).toString('utf8');
+      const previous = fs.get(this.uri);
+      fs.set(this.uri, options?.append && typeof previous === 'string' ? previous + text : text);
+    }
+    // FileHandle do expo-file-system: leitura por offset e escrita sequencial (só no fim) sobre o
+    // conteúdo em memória. writeBytes assume UTF-8 (os arquivos do app são JSON/base64 ASCII).
+    open() {
+      const uri = this.uri;
+      if (!fs.has(uri)) throw new Error('File does not exist');
+      let offset = 0;
+      let closed = false;
+      let end = sizeOf(fs.get(uri));
+      let cache = null;
+      const live = () => {
+        if (closed) throw new Error('file handle is closed');
+      };
+      const bytes = () => {
+        const v = fs.get(uri);
+        if (typeof v !== 'string') throw new Error('fake file without content');
+        if (!cache || cache.text !== v) cache = { text: v, bytes: Buffer.from(v) };
+        return cache.bytes;
+      };
+      return {
+        get offset() {
+          return closed ? null : offset;
+        },
+        set offset(value) {
+          live();
+          offset = value;
+        },
+        get size() {
+          return closed ? null : end;
+        },
+        readBytes(length) {
+          live();
+          const out = Uint8Array.from(bytes().subarray(offset, offset + length));
+          offset += out.length;
+          return out;
+        },
+        writeBytes(data) {
+          live();
+          if (offset !== end) throw new Error('fake handle: só grava no fim do arquivo');
+          const previous = fs.get(uri);
+          fs.set(uri, (typeof previous === 'string' ? previous : '') + Buffer.from(data).toString('utf8'));
+          offset += data.length;
+          end += data.length;
+        },
+        close() {
+          closed = true;
+        },
+      };
     }
     create() {
       if (!fs.has(this.uri)) fs.set(this.uri, '');

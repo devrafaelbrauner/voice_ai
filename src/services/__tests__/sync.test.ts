@@ -102,6 +102,8 @@ class FakeRemote {
 declare global {
   var __remote: FakeRemote;
   var __userId: string;
+  /** 'never' = supabase.auth.getUser nunca responde; Deferred = responde quando o teste liberar. */
+  var __authHang: 'never' | Deferred | undefined;
 }
 
 jest.mock('../supabase', () => ({
@@ -113,7 +115,12 @@ jest.mock('../supabase', () => ({
 }));
 jest.mock('../auth', () => ({
   __esModule: true,
-  getCurrentUser: async () => (globalThis.__userId ? { id: globalThis.__userId } : null),
+  getCurrentUser: async () => {
+    const hang = globalThis.__authHang;
+    if (hang === 'never') await new Promise<never>(() => {});
+    else if (hang) await hang.promise;
+    return globalThis.__userId ? { id: globalThis.__userId } : null;
+  },
 }));
 
 interface Env {
@@ -135,6 +142,7 @@ beforeEach(() => {
   remote = new FakeRemote();
   globalThis.__remote = remote;
   globalThis.__userId = USER;
+  globalThis.__authHang = undefined;
   jest.resetModules();
   const db = jest.requireActual<typeof DbModule>('../db');
   env = {
@@ -425,6 +433,95 @@ describe('mutex e watchdog (25 s)', () => {
 
     expect(await localKeys()).toEqual([]);
     expect(env.sync.getSyncStatus().status).toBe('success');
+  });
+
+  describe('servidor aceita a conexão e não responde ANTES do lock (G1)', () => {
+    const TIMEOUT = /Tempo esgotado/;
+
+    test('syncNow: getUser que nunca responde estoura aos 25 s com erro claro, sem prender status nem mutex', async () => {
+      globalThis.__authHang = 'never';
+      let settled = false;
+      const p1 = env.sync.syncNow().then((r) => { settled = true; return r; });
+
+      await jest.advanceTimersByTimeAsync(24_999);
+      expect(settled).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      const r1 = await p1;
+
+      expect(r1.error).toMatch(TIMEOUT);
+      expect(r1.error).toMatch(/demorou demais/);
+      expect(env.sync.getSyncStatus().status).toBe('error'); // nunca fica em 'syncing'
+
+      globalThis.__authHang = undefined; // servidor voltou
+      const r2 = await env.sync.syncNow();
+      expect(r2.error).toBeUndefined();
+      expect(env.sync.getSyncStatus().status).toBe('success');
+    });
+
+    test('pullOnLogin: getUser que nunca responde resolve aos 25 s (não pendura o login) e o sync seguinte funciona', async () => {
+      globalThis.__authHang = 'never';
+      let settled = false;
+      const p1 = env.sync.pullOnLogin().then(() => { settled = true; });
+
+      await jest.advanceTimersByTimeAsync(24_999);
+      expect(settled).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      await p1;
+      expect(settled).toBe(true);
+      expect(env.sync.getSyncStatus().status).toBe('error');
+
+      globalThis.__authHang = undefined;
+      expect((await env.sync.syncNow()).error).toBeUndefined();
+      expect(env.sync.getSyncStatus().status).toBe('success');
+    });
+
+    test('queueSync: auto-push com getUser travado estoura aos 25 s (após o debounce de 3 s) e o próximo sync roda', async () => {
+      // O beforeEach desliga o listener de mudança; aqui o disparo é direto.
+      globalThis.__authHang = 'never';
+      env.sync.queueSync();
+      await jest.advanceTimersByTimeAsync(3_000 + 24_999);
+      expect(env.sync.getSyncStatus().status).toBe('idle');
+      await jest.advanceTimersByTimeAsync(1);
+      expect(env.sync.getSyncStatus().status).toBe('error');
+
+      globalThis.__authHang = undefined;
+      expect((await env.sync.syncNow()).error).toBeUndefined();
+      expect(env.sync.getSyncStatus().status).toBe('success');
+    });
+
+    test('getUser que responde depois do limite não executa o sync abortado nem assume o lock', async () => {
+      const auth = deferred();
+      globalThis.__authHang = auth;
+      const p1 = env.sync.syncNow();
+      await jest.advanceTimersByTimeAsync(25_000);
+      expect((await p1).error).toMatch(TIMEOUT);
+      expect(env.sync.getSyncStatus().status).toBe('error');
+
+      auth.resolve(); // resposta atrasada do servidor
+      await settle();
+      expect(remote.calls).toEqual([]); // o run abortado não tocou no remoto
+      expect(env.sync.getSyncStatus().status).toBe('error');
+
+      globalThis.__authHang = undefined;
+      expect((await env.sync.syncNow()).error).toBeUndefined(); // sem lock preso
+    });
+
+    test('espera pelo lock conta no limite total: quem chega depois não ganha um novo prazo de 25 s para esperar', async () => {
+      const gate = deferred();
+      remote.gate = gate; // run 1 trava dentro do lock
+      const p1 = env.sync.syncNow();
+      await settle();
+      await jest.advanceTimersByTimeAsync(15_000);
+      const p2 = env.sync.syncNow(); // chega aos 15 s e espera o lock
+      await settle();
+
+      await jest.advanceTimersByTimeAsync(10_000); // 25 s do run 1: ele estoura e libera o lock
+      expect((await p1).error).toMatch(TIMEOUT);
+      const r2 = await p2; // run 2 assume o lock e termina dentro do seu próprio limite
+      expect(r2.error).toBeUndefined();
+      expect(env.sync.getSyncStatus().status).toBe('success');
+      gate.resolve();
+    });
   });
 });
 

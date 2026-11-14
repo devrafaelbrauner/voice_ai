@@ -326,6 +326,63 @@ describe('resumo por contagem SQL', () => {
   });
 });
 
+describe('leitura em lotes (backup em blocos)', () => {
+  test('getRecordingFileNames: só a chave, na ordem de inserção (não alfabética), sem decifrar nada', async () => {
+    for (const name of ['recording_b.m4a', 'recording_a.m4a', 'recording_c.m4a']) await db.setField(name, 'transcript', `texto ${name}`);
+    const all = jest.spyOn(await db.getDb(), 'getAllAsync');
+    expect(await db.getRecordingFileNames()).toEqual(['recording_b.m4a', 'recording_a.m4a', 'recording_c.m4a']);
+    expect(all.mock.calls.map(([sql]) => sql)).toEqual(['SELECT fileName FROM recordings ORDER BY rowid']); // só a chave
+    await db.deleteRecordingMeta('recording_a.m4a');
+    expect(await db.getRecordingFileNames()).toEqual(['recording_b.m4a', 'recording_c.m4a']);
+  });
+
+  test('getRecordingFileNames em banco vazio devolve []', async () => {
+    expect(await db.getRecordingFileNames()).toEqual([]);
+  });
+
+  test('getRecordingsMetaByNames: decifra os campos sensíveis, na ordem PEDIDA, e omite nomes que não existem mais', async () => {
+    await db.setField('r1.m4a', 'transcript', 'transcrição 1 ação');
+    await db.updateFieldIfExists('r1.m4a', 'patientName', 'Maria');
+    await db.setField('r2.m4a', 'transcript', 'transcrição 2');
+    await db.updateFieldIfExists('r2.m4a', 'summary', 'resumo 2');
+    await db.updateFieldIfExists('r2.m4a', 'customName', 'Consulta 2');
+    await db.updateFieldIfExists('r2.m4a', 'durationSecs', '42');
+    await db.setField('r3.m4a', 'transcript', 'transcrição 3');
+
+    const rows = await db.getRecordingsMetaByNames(['r3.m4a', 'sumiu.m4a', 'r1.m4a', 'r2.m4a']);
+    expect(rows.map((r) => r.fileName)).toEqual(['r3.m4a', 'r1.m4a', 'r2.m4a']);
+    expect(rows[1]).toMatchObject({ transcript: 'transcrição 1 ação', patientName: 'Maria', summary: null, customName: null });
+    expect(rows[2]).toMatchObject({ transcript: 'transcrição 2', summary: 'resumo 2', customName: 'Consulta 2', durationSecs: 42 });
+
+    // idêntico ao que getAllRecordingsMeta devolve para as mesmas linhas
+    const all = await db.getAllRecordingsMeta();
+    for (const r of rows) expect(r).toEqual(all.get(r.fileName));
+  });
+
+  test('getRecordingsMetaByNames: lista vazia não consulta o banco; texto puro legado passa direto; chave errada vira o sentinel', async () => {
+    const d = await db.getDb();
+    const all = jest.spyOn(d, 'getAllAsync');
+    expect(await db.getRecordingsMetaByNames([])).toEqual([]);
+    expect(all).not.toHaveBeenCalled();
+
+    await insertRecording('legado.m4a', { transcript: 'texto puro antigo' });
+    await insertRecording('ruim.m4a', { transcript: 'enc1:AAAA:BBBB' });
+    const [legacy, bad] = await db.getRecordingsMetaByNames(['legado.m4a', 'ruim.m4a']);
+    expect(legacy.transcript).toBe('texto puro antigo');
+    expect(bad.transcript).toBe(crypto.DECRYPT_FAILED_SENTINEL);
+  });
+
+  test('um lote vira UM SELECT com um parâmetro por nome (sem N+1)', async () => {
+    const names = Array.from({ length: 100 }, (_, i) => `r${i}.m4a`);
+    for (const name of names) await insertRecording(name, { customName: 'x' });
+    const d = await db.getDb();
+    const all = jest.spyOn(d, 'getAllAsync');
+    expect(await db.getRecordingsMetaByNames(names)).toHaveLength(100);
+    expect(all).toHaveBeenCalledTimes(1);
+    expect(all.mock.calls[0][1]).toEqual(names);
+  });
+});
+
 describe('db-crypto com AES-GCM nativo (formato enc1:iv:ct inalterado)', () => {
   // Gerado pelo db-crypto ANTERIOR (@noble/ciphers em JS): chave fixa + valores cifrados.
   const FIXTURE: { keyB64: string; cases: { plain: string; stored: string }[] } = JSON.parse(

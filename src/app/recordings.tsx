@@ -959,7 +959,7 @@ export default function RecordingsScreen() {
               {!isProcessingQueue && (
                 <Pressable
                   onPress={() => processOfflineQueue(true)}
-                  hitSlop={{ top: 9, bottom: 9, left: 6, right: 6 }}
+                  style={{ minHeight: 48, justifyContent: 'center' }}
                   accessibilityRole="button"
                   accessibilityLabel="Tentar processar fila offline agora"
                 >
@@ -1003,7 +1003,7 @@ export default function RecordingsScreen() {
               </YStack>
               <Pressable
                 onPress={handleClearFailedItems}
-                hitSlop={{ top: 9, bottom: 9, left: 6, right: 6 }}
+                style={{ minHeight: 48, justifyContent: 'center' }}
                 accessibilityRole="button"
                 accessibilityLabel="Limpar transcrições com falha permanente"
               >
@@ -1047,7 +1047,14 @@ export default function RecordingsScreen() {
           </YStack>
           <Link href="/recordings" asChild>
             <Pressable
-              hitSlop={{ top: 14, bottom: 14, left: 15, right: 13 }}
+              style={{
+                minWidth: 48,
+                minHeight: 48,
+                alignItems: 'center',
+                justifyContent: 'center',
+                marginVertical: -13,
+                marginRight: -13,
+              }}
               accessibilityRole="button"
               accessibilityLabel="Remover filtro de paciente"
             >
@@ -1077,6 +1084,7 @@ export default function RecordingsScreen() {
             style={{
               flex: 1,
               paddingVertical: 10,
+              minHeight: 48,
               fontSize: 14,
               color: c.text,
             }}
@@ -1086,7 +1094,13 @@ export default function RecordingsScreen() {
           {searchQuery.length > 0 && (
             <Pressable
               onPress={() => setSearchQuery('')}
-              hitSlop={{ top: 15, bottom: 15, left: 17, right: 13 }}
+              style={{
+                minWidth: 48,
+                minHeight: 48,
+                alignItems: 'center',
+                justifyContent: 'center',
+                marginRight: -13,
+              }}
               accessibilityRole="button"
               accessibilityLabel="Limpar busca"
             >
@@ -1208,7 +1222,9 @@ export default function RecordingsScreen() {
                             borderWidth: 1,
                             borderColor: customDateStart && !parseDateBR(customDateStart) ? c.accentRed : c.borderInput,
                             borderRadius: 8,
-                            padding: 10,
+                            paddingHorizontal: 10,
+                            paddingVertical: 10,
+                            minHeight: 48,
                             color: c.text,
                             fontSize: 13,
                           }}
@@ -1228,7 +1244,9 @@ export default function RecordingsScreen() {
                             borderWidth: 1,
                             borderColor: customDateEnd && !parseDateBR(customDateEnd) ? c.accentRed : c.borderInput,
                             borderRadius: 8,
-                            padding: 10,
+                            paddingHorizontal: 10,
+                            paddingVertical: 10,
+                            minHeight: 48,
                             color: c.text,
                             fontSize: 13,
                           }}
@@ -1586,7 +1604,7 @@ export default function RecordingsScreen() {
                           alignSelf="flex-start"
                           mb="$1"
                         >
-                          <Text fontSize={10} fontWeight="700" color={c.primaryDeep}>
+                          <Text fontSize={10} fontWeight="700" color={c.primaryDeep} numberOfLines={1}>
                             {item.patientName}
                           </Text>
                         </XStack>
@@ -1597,17 +1615,34 @@ export default function RecordingsScreen() {
                           fontWeight="700"
                           fontSize={14}
                           f={1}
-                          numberOfLines={1}
+                          numberOfLines={2}
                         >
                           {displayName}
                         </Text>
                       </XStack>
-                      <Text color={c.textMuted} fontSize={12} mt="$1">
-                        {formatDate(item.createdAt)}
-                        {item.durationSecs
-                          ? ` · ${formatDuration(item.durationSecs)}`
-                          : ''}
-                      </Text>
+                      <XStack alignItems="center" gap="$2" flexWrap="wrap" mt="$1">
+                        <Text color={c.textMuted} fontSize={12}>
+                          {formatDate(item.createdAt)}
+                          {item.durationSecs
+                            ? ` · ${formatDuration(item.durationSecs)}`
+                            : ''}
+                        </Text>
+                        {/* Chip dentro da coluna de texto: como item próprio da linha, ocupava ~98 dp
+                            e deixava <10 dp para o nome em telas de 320 dp. */}
+                        {item.summary && (
+                          <XStack
+                            bg={c.bgGreenSoft}
+                            px="$2"
+                            py={2}
+                            borderRadius={999}
+                            alignItems="center"
+                          >
+                            <Text fontSize={11} fontWeight="700" color={c.primary}>
+                              ✓ Processado
+                            </Text>
+                          </XStack>
+                        )}
+                      </XStack>
                       {matchSnippet && matchLabel && (
                         <XStack gap="$1" alignItems="flex-start" mt="$1">
                           <Search size={11} color={c.accentBlue} style={{ marginTop: 2 }} />
@@ -1625,20 +1660,6 @@ export default function RecordingsScreen() {
                         </Text>
                       )}
                     </YStack>
-
-                    {item.summary && (
-                      <XStack
-                        bg={c.bgGreenSoft}
-                        px="$2"
-                        py={4}
-                        borderRadius={999}
-                        alignItems="center"
-                      >
-                        <Text fontSize={11} fontWeight="700" color={c.primary}>
-                          ✓ Processado
-                        </Text>
-                      </XStack>
-                    )}
 
                     {!isEditing && (
                       <Pressable
@@ -2237,7 +2258,7 @@ export default function RecordingsScreen() {
           const fullCopyKey = `view_transcript_${item.fileName}`;
           return (
             <YStack f={1} bg={c.bgScreen} p="$4">
-              <XStack alignItems="center" gap="$3" mt="$6" mb="$3">
+              <XStack alignItems="center" gap="$3" mt="$6" mb="$3" flexWrap="wrap">
                 <Pressable
                   style={swipeStyles.iconTouch}
                   onPress={() => setViewingTranscriptFile(null)}
@@ -2246,7 +2267,9 @@ export default function RecordingsScreen() {
                 >
                   <ArrowLeft size={28} color={c.primary} />
                 </Pressable>
-                <YStack f={1}>
+                {/* flexBasis 100 + wrap: em 320 dp as 3 ações (144 dp) descem para a 2ª linha
+                    em vez de espremer o título a ~80 dp. */}
+                <YStack style={{ flexGrow: 1, flexShrink: 1, flexBasis: 100 }}>
                   <Text fontSize={18} fontWeight="800" color={c.text} numberOfLines={1}>
                     Transcrição
                   </Text>
@@ -2254,39 +2277,43 @@ export default function RecordingsScreen() {
                     {displayName}
                   </Text>
                 </YStack>
-                {copiedKey === fullCopyKey ? (
-                  <Text fontSize={12} color={c.primary} fontWeight="700">
-                    Copiado!
-                  </Text>
-                ) : (
+                <XStack alignItems="center" style={{ marginLeft: 'auto' }}>
+                  {copiedKey === fullCopyKey ? (
+                    <View style={swipeStyles.iconTouch}>
+                      <Text fontSize={12} color={c.primary} fontWeight="700">
+                        Copiado!
+                      </Text>
+                    </View>
+                  ) : (
+                    <Pressable
+                      onPress={() => copyToClipboard(item.transcript ?? '', fullCopyKey)}
+                      style={swipeStyles.iconTouch}
+                      accessibilityRole="button"
+                      accessibilityLabel="Copiar transcrição completa"
+                    >
+                      <Copy size={22} color={c.primary} />
+                    </Pressable>
+                  )}
                   <Pressable
-                    onPress={() => copyToClipboard(item.transcript ?? '', fullCopyKey)}
-                    style={[swipeStyles.iconTouch, { marginLeft: -13 }]}
+                    onPress={() => shareText(item.transcript ?? '', `Transcrição - ${displayName}`)}
+                    style={swipeStyles.iconTouch}
                     accessibilityRole="button"
-                    accessibilityLabel="Copiar transcrição completa"
+                    accessibilityLabel="Compartilhar transcrição completa"
                   >
-                    <Copy size={22} color={c.primary} />
+                    <Share2 size={22} color={c.primary} />
                   </Pressable>
-                )}
-                <Pressable
-                  onPress={() => shareText(item.transcript ?? '', `Transcrição - ${displayName}`)}
-                  style={[swipeStyles.iconTouch, { marginLeft: -13 }]}
-                  accessibilityRole="button"
-                  accessibilityLabel="Compartilhar transcrição completa"
-                >
-                  <Share2 size={22} color={c.primary} />
-                </Pressable>
-                <Pressable
-                  onPress={() => {
-                    setViewingTranscriptFile(null);
-                    setTimeout(() => openEditTranscriptModal(item), 300);
-                  }}
-                  style={[swipeStyles.iconTouch, { marginLeft: -13 }]}
-                  accessibilityRole="button"
-                  accessibilityLabel="Editar transcrição"
-                >
-                  <Pencil size={22} color={c.primary} />
-                </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      setViewingTranscriptFile(null);
+                      setTimeout(() => openEditTranscriptModal(item), 300);
+                    }}
+                    style={swipeStyles.iconTouch}
+                    accessibilityRole="button"
+                    accessibilityLabel="Editar transcrição"
+                  >
+                    <Pencil size={22} color={c.primary} />
+                  </Pressable>
+                </XStack>
               </XStack>
 
               <ScrollView

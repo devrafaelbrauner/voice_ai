@@ -342,11 +342,18 @@ export default function StatsScreen() {
           </Text>
 
           {/* Period selector chips */}
-          <XStack gap="$2" flexWrap="wrap">
+          <XStack flexWrap="wrap" style={{ columnGap: 8, rowGap: 0 }}>
             {PERIOD_CHIPS.map(({ key, label }) => {
               const active = period === key;
               return (
-                <Pressable key={key} onPress={() => setPeriod(key)}>
+                <Pressable
+                  key={key}
+                  onPress={() => setPeriod(key)}
+                  style={{ minHeight: 48, minWidth: 48, justifyContent: 'center', alignItems: 'center' }}
+                  accessibilityRole="radio"
+                  accessibilityLabel={label}
+                  accessibilityState={{ checked: active }}
+                >
                   <View
                     style={{
                       paddingHorizontal: 12,

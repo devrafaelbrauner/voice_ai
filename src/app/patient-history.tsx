@@ -482,10 +482,11 @@ export default function PatientHistoryScreen() {
                               fontSize={12}
                               color={c.secondary}
                               f={1}
+                              numberOfLines={1}
                             >
                               RESUMO / IA
                             </Text>
-                            <XStack gap="$2" alignItems="center">
+                            <XStack alignItems="center">
                               {copiedKey === copySmKey ? (
                                 <Text fontSize={11} color={c.primary} fontWeight="700">
                                   Copiado!
@@ -558,10 +559,11 @@ export default function PatientHistoryScreen() {
                               fontSize={12}
                               color={c.primary}
                               f={1}
+                              numberOfLines={1}
                             >
                               TRANSCRIÇÃO
                             </Text>
-                            <XStack gap="$2" alignItems="center">
+                            <XStack alignItems="center">
                               {copiedKey === copyTxKey ? (
                                 <Text fontSize={11} color={c.primary} fontWeight="700">
                                   Copiado!

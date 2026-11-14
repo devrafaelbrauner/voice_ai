@@ -57,6 +57,8 @@ interface SyncRun {
 }
 
 const SYNC_WATCHDOG_MS = 25_000;
+const SYNC_TIMEOUT_MESSAGE =
+  'Tempo esgotado: a sincronização demorou demais (mais de 25 s) e foi cancelada. Tente novamente.';
 
 class SyncAbortedError extends Error {
   constructor() {
@@ -86,32 +88,49 @@ function setFailedStatus() {
 let activeLock: { released: Promise<void> } | null = null;
 
 /**
- * Executa `fn` com exclusão mútua (um sync por vez; os demais esperam a vez).
- * Watchdog: após 25 s o lock é liberado, o run é marcado como abortado e quem
- * chamou recebe erro. O run abortado pode ainda ter uma requisição em voo, por isso
- * todo upsert remoto/local confere o tombstone imediatamente antes de gravar.
+ * Executa um sync com limite de tempo TOTAL de 25 s, contado desde a chamada: cobre a obtenção
+ * do usuário (`getCurrentUser`, rede), a espera pela vez no mutex e o corpo. Retorna `null`
+ * quando não há usuário logado.
+ *
+ * Estourou o limite: o run é marcado como abortado (para no próximo checkpoint e não grava
+ * mais nada), o lock é liberado se este run o tinha, e o chamador recebe um erro "Tempo
+ * esgotado". Um run que ainda está esperando o usuário ou o lock nunca chega a assumir o
+ * lock depois de abortado. Requisições em voo não são canceladas (o cliente Supabase não
+ * aceita AbortSignal por chamada); por isso todo upsert remoto/local confere o tombstone
+ * imediatamente antes de gravar e `run.aborted` antes de qualquer efeito.
  */
-async function runExclusive<T>(fn: (run: SyncRun) => Promise<T>): Promise<T> {
-  while (activeLock) await activeLock.released;
+async function runExclusive<T>(fn: (run: SyncRun, userId: string) => Promise<T>): Promise<T | null> {
   const run: SyncRun = { aborted: false };
-  let release!: () => void;
-  const lock = { released: new Promise<void>((r) => { release = r; }) };
-  activeLock = lock;
+  let lock: { released: Promise<void> } | null = null;
+  let release: () => void = () => {};
   let timer: ReturnType<typeof setTimeout> | undefined;
   const watchdog = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       run.aborted = true;
       logError('sync', `watchdog: sincronização excedeu ${SYNC_WATCHDOG_MS / 1000} s; lock liberado`);
-      if (activeLock === lock) activeLock = null;
+      if (lock && activeLock === lock) activeLock = null;
       release();
-      reject(new Error('A sincronização demorou demais (mais de 25 s) e foi cancelada. Tente novamente.'));
+      reject(new Error(SYNC_TIMEOUT_MESSAGE));
     }, SYNC_WATCHDOG_MS);
   });
+  const body = async (): Promise<T | null> => {
+    const user = await getCurrentUser();
+    if (!user) return null;
+    assertRun(run);
+    while (activeLock) {
+      await activeLock.released;
+      assertRun(run);
+    }
+    const mine = { released: new Promise<void>((r) => { release = r; }) };
+    lock = mine;
+    activeLock = mine;
+    return fn(run, user.id);
+  };
   try {
-    return await Promise.race([fn(run), watchdog]);
+    return await Promise.race([body(), watchdog]);
   } finally {
     clearTimeout(timer);
-    if (activeLock === lock) activeLock = null;
+    if (lock && activeLock === lock) activeLock = null;
     release();
   }
 }
@@ -553,28 +572,27 @@ async function pullAll(userId: string, run: SyncRun) {
 
 // ─── API pública ────────────────────────────────────────────
 
+const NOT_LOGGED_IN_RESULT = (): SyncResult => ({
+  pushed: { recordings: 0, templates: 0, profile: false },
+  pulled: { recordings: 0, templates: 0, profile: false },
+  error: 'Não logado.',
+});
+
 export async function syncNow(): Promise<SyncResult> {
-  const user = await getCurrentUser();
-  if (!user) {
-    return {
-      pushed: { recordings: 0, templates: 0, profile: false },
-      pulled: { recordings: 0, templates: 0, profile: false },
-      error: 'Não logado.',
-    };
-  }
   try {
-    return await runExclusive(async (run) => {
+    const result = await runExclusive(async (run, userId) => {
       setRunStatus(run, 'syncing');
-      await ensureOwner(user.id);
+      await ensureOwner(userId);
       // Exclusões primeiro: o pull seguinte nunca vê o item remoto que o usuário apagou.
-      await flushDeletions(user.id, run);
-      const pulled = await pullAll(user.id, run);
-      const pushed = await pushAll(user.id, run);
+      await flushDeletions(userId, run);
+      const pulled = await pullAll(userId, run);
+      const pushed = await pushAll(userId, run);
       // Exclusões feitas durante este sync (depois do primeiro flush).
-      await flushDeletions(user.id, run);
+      await flushDeletions(userId, run);
       setRunStatus(run, 'success');
       return { pulled, pushed };
     });
+    return result ?? NOT_LOGGED_IN_RESULT();
   } catch (err: any) {
     setFailedStatus();
     return {
@@ -587,14 +605,12 @@ export async function syncNow(): Promise<SyncResult> {
 
 // Pull-only — usado no login e na inicialização do app
 export async function pullOnLogin(): Promise<void> {
-  const user = await getCurrentUser();
-  if (!user) return;
   try {
-    await runExclusive(async (run) => {
+    await runExclusive(async (run, userId) => {
       setRunStatus(run, 'syncing');
-      await ensureOwner(user.id);
-      await flushDeletions(user.id, run);
-      await pullAll(user.id, run);
+      await ensureOwner(userId);
+      await flushDeletions(userId, run);
+      await pullAll(userId, run);
       setRunStatus(run, 'success');
     });
   } catch (err) {
@@ -611,17 +627,16 @@ export function queueSync() {
   pushTimer = setTimeout(async () => {
     pushTimer = null;
     try {
-      const user = await getCurrentUser();
-      if (!user) return;
-      await runExclusive(async (run) => {
+      const ran = await runExclusive(async (run, userId) => {
         setRunStatus(run, 'syncing');
-        await ensureOwner(user.id);
-        await flushDeletions(user.id, run);
-        await pushAll(user.id, run);
-        await flushDeletions(user.id, run);
+        await ensureOwner(userId);
+        await flushDeletions(userId, run);
+        await pushAll(userId, run);
+        await flushDeletions(userId, run);
         setRunStatus(run, 'success');
+        return true;
       });
-      logDebug('sync', 'auto-push concluído');
+      if (ran) logDebug('sync', 'auto-push concluído');
     } catch (err) {
       logError('sync.autoPush', err);
       setFailedStatus();

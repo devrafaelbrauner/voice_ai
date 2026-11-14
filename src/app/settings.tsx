@@ -123,6 +123,72 @@ function SectionHeader({ label }: { label: string }) {
   );
 }
 
+/**
+ * Linha de configuração com Switch. A linha inteira é o alvo de toque
+ * (>= 48 dp; o Switch nativo mede 47×27 dp). O Switch interno é apenas visual.
+ */
+function SwitchRow({
+  title,
+  subtitle,
+  value,
+  onValueChange,
+  activeColor,
+  accessibilityLabel,
+  accessibilityHint,
+}: {
+  title: string;
+  subtitle: string;
+  value: boolean;
+  onValueChange: (v: boolean) => void;
+  activeColor: string;
+  accessibilityLabel: string;
+  accessibilityHint: string;
+}) {
+  const c = useColors();
+  return (
+    <Pressable
+      onPress={() => onValueChange(!value)}
+      accessibilityRole="switch"
+      accessibilityState={{ checked: value }}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityHint={accessibilityHint}
+      style={{ minHeight: 48 }}
+    >
+      <XStack
+        bg={c.bgSubtle}
+        borderWidth={1}
+        borderColor={c.border}
+        p="$3"
+        borderRadius="$3"
+        alignItems="center"
+        justifyContent="space-between"
+        gap="$3"
+        minHeight={48}
+      >
+        <YStack f={1} flexShrink={1} gap="$1">
+          <Text fontWeight="700" fontSize={14} color={c.text}>
+            {title}
+          </Text>
+          <Text fontSize={12} color={c.textSecondary}>
+            {subtitle}
+          </Text>
+        </YStack>
+        <View
+          pointerEvents="none"
+          accessible={false}
+          importantForAccessibility="no-hide-descendants"
+        >
+          <Switch
+            value={value}
+            trackColor={{ false: c.borderInput, true: activeColor }}
+            thumbColor={value ? activeColor : c.bgCard}
+          />
+        </View>
+      </XStack>
+    </Pressable>
+  );
+}
+
 export default function SettingsScreen() {
   const { isDark, toggleTheme } = useTheme();
   const c = useColors();
@@ -133,7 +199,9 @@ export default function SettingsScreen() {
       borderWidth: 1,
       borderColor: c.borderInput,
       borderRadius: 8,
-      padding: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 12,
+      minHeight: 48,
       fontSize: 14,
       backgroundColor: c.bgInput,
       color: c.text,
@@ -811,37 +879,19 @@ export default function SettingsScreen() {
             Opcional. Ative para incluir dados profissionais nos PDFs e exportações para o EvoPad.
           </Text>
 
-          <XStack
-            bg={c.bgSubtle}
-            borderWidth={1}
-            borderColor={c.border}
-            p="$3"
-            borderRadius="$3"
-            alignItems="center"
-            justifyContent="space-between"
-            gap="$3"
-          >
-            <YStack f={1} gap="$1">
-              <Text fontWeight="700" fontSize={14} color={c.text}>
-                Habilitar perfil profissional
-              </Text>
-              <Text fontSize={12} color={c.textSecondary}>
-                {doctor.professionalEnabled
-                  ? 'Perfil profissional ativo (Médico)'
-                  : 'Apenas perfil pessoal'}
-              </Text>
-            </YStack>
-            <Switch
-              value={doctor.professionalEnabled}
-              onValueChange={(v) =>
-                setDoctor({ ...doctor, professionalEnabled: v })
-              }
-              trackColor={{ false: c.borderInput, true: c.secondary }}
-              thumbColor={doctor.professionalEnabled ? c.secondary : c.bgCard}
-              accessibilityLabel="Habilitar perfil profissional"
-              accessibilityHint="Inclui dados de médico nos PDFs e exportações"
-            />
-          </XStack>
+          <SwitchRow
+            title="Habilitar perfil profissional"
+            subtitle={
+              doctor.professionalEnabled
+                ? 'Perfil profissional ativo (Médico)'
+                : 'Apenas perfil pessoal'
+            }
+            value={doctor.professionalEnabled}
+            onValueChange={(v) => setDoctor({ ...doctor, professionalEnabled: v })}
+            activeColor={c.secondary}
+            accessibilityLabel="Habilitar perfil profissional"
+            accessibilityHint="Inclui dados de médico nos PDFs e exportações"
+          />
 
           {doctor.professionalEnabled && (
             <YStack
@@ -958,33 +1008,15 @@ export default function SettingsScreen() {
               Aparência
             </Text>
           </XStack>
-          <XStack
-            bg={c.bgSubtle}
-            borderWidth={1}
-            borderColor={c.border}
-            p="$3"
-            borderRadius="$3"
-            alignItems="center"
-            justifyContent="space-between"
-            gap="$3"
-          >
-            <YStack f={1} gap="$1">
-              <Text fontWeight="700" fontSize={14} color={c.text}>
-                Modo Escuro
-              </Text>
-              <Text fontSize={12} color={c.textSecondary}>
-                {isDark ? 'Tema escuro ativado' : 'Tema claro ativado'}
-              </Text>
-            </YStack>
-            <Switch
-              value={isDark}
-              onValueChange={() => toggleTheme()}
-              trackColor={{ false: c.borderInput, true: c.primary }}
-              thumbColor={isDark ? c.primary : c.bgCard}
-              accessibilityLabel="Modo escuro"
-              accessibilityHint={isDark ? 'Desativar tema escuro' : 'Ativar tema escuro'}
-            />
-          </XStack>
+          <SwitchRow
+            title="Modo Escuro"
+            subtitle={isDark ? 'Tema escuro ativado' : 'Tema claro ativado'}
+            value={isDark}
+            onValueChange={() => toggleTheme()}
+            activeColor={c.primary}
+            accessibilityLabel="Modo escuro"
+            accessibilityHint={isDark ? 'Desativar tema escuro' : 'Ativar tema escuro'}
+          />
         </YStack>
 
         {/* SEÇÃO: MODELO DE IA */}
@@ -1175,33 +1207,15 @@ export default function SettingsScreen() {
           </XStack>
 
           {user && (
-            <XStack
-              bg={c.bgSubtle}
-              borderWidth={1}
-              borderColor={c.border}
-              p="$3"
-              borderRadius="$3"
-              alignItems="center"
-              justifyContent="space-between"
-              gap="$3"
-            >
-              <YStack f={1} gap="$1">
-                <Text fontWeight="700" fontSize={14} color={c.text}>
-                  Forçar chave própria
-                </Text>
-                <Text fontSize={12} color={c.textSecondary}>
-                  Use sua chave OpenAI mesmo logado (não recomendado).
-                </Text>
-              </YStack>
-              <Switch
-                value={forceDirect}
-                onValueChange={handleToggleForceDirect}
-                trackColor={{ false: c.borderInput, true: c.accentOrange }}
-                thumbColor={forceDirect ? c.accentOrange : c.bgCard}
-                accessibilityLabel="Forçar chave própria OpenAI"
-                accessibilityHint="Usa sua chave OpenAI mesmo quando o proxy seguro está disponível"
-              />
-            </XStack>
+            <SwitchRow
+              title="Forçar chave própria"
+              subtitle="Use sua chave OpenAI mesmo logado (não recomendado)."
+              value={forceDirect}
+              onValueChange={handleToggleForceDirect}
+              activeColor={c.accentOrange}
+              accessibilityLabel="Forçar chave própria OpenAI"
+              accessibilityHint="Usa sua chave OpenAI mesmo quando o proxy seguro está disponível"
+            />
           )}
         </YStack>
 
@@ -1659,7 +1673,7 @@ export default function SettingsScreen() {
             gap="$2"
           >
             <TextInput
-              style={{ flex: 1, paddingVertical: 12, fontSize: 13, color: c.text, fontFamily: 'monospace' }}
+              style={{ flex: 1, minHeight: 48, paddingVertical: 12, fontSize: 13, color: c.text, fontFamily: 'monospace' }}
               placeholder="Cole a signature_session aqui..."
               placeholderTextColor={c.textPlaceholder}
               value={showBirdIdToken ? birdIdToken : birdIdToken ? '••••••••••••••••' : ''}
