@@ -102,6 +102,64 @@ export function gcmDecrypt(
   return plain;
 }
 
+/**
+ * AES-256-GCM em blocos: `update` por pedaço e a tag só em `finish()` (GCM é um modo de fluxo;
+ * o resultado é byte a byte o mesmo do `gcmEncrypt` de uma vez). Passe arrays que ocupam o
+ * ArrayBuffer inteiro (sem `subarray`): o quick-crypto copia a janela de uma visão parcial.
+ */
+export interface GcmEncryptStream {
+  /** Cifra o bloco; devolve o ciphertext do mesmo tamanho. */
+  update(plain: Uint8Array): Uint8Array;
+  /** Fecha o fluxo; devolve o que falta do ciphertext (0 bytes no GCM) seguido da tag de 16 bytes. */
+  finish(): Uint8Array;
+}
+
+export function gcmEncryptStream(n: NativeCrypto, key: Uint8Array, nonce: Uint8Array, aad: Uint8Array): GcmEncryptStream {
+  const cipher = n.createCipheriv('aes-256-gcm', key, nonce);
+  cipher.setAAD(n.Buffer.from(aad));
+  return {
+    update: (plain) => asBytes(cipher.update(plain)),
+    finish() {
+      const rest = cipher.final();
+      const tag = cipher.getAuthTag();
+      const out = new Uint8Array(rest.length + tag.length);
+      out.set(rest, 0);
+      out.set(tag, rest.length);
+      return out;
+    },
+  };
+}
+
+/**
+ * Decifra em blocos com a tag JÁ conhecida (os últimos 16 bytes do arquivo). ATENÇÃO: o plaintext
+ * de `update` só é autêntico depois de `finish()` sem erro — quem consome em fluxo precisa confirmar
+ * a tag antes de agir sobre os dados (o restore faz um passe só de verificação e commita só depois
+ * do segundo `finish()`).
+ */
+export interface GcmDecryptStream {
+  update(chunk: Uint8Array): Uint8Array;
+  /** Lança se a tag não confere (chave errada ou dado adulterado). */
+  finish(): void;
+}
+
+export function gcmDecryptStream(
+  n: NativeCrypto,
+  key: Uint8Array,
+  nonce: Uint8Array,
+  aad: Uint8Array,
+  tag: Uint8Array
+): GcmDecryptStream {
+  const decipher = n.createDecipheriv('aes-256-gcm', key, nonce);
+  decipher.setAAD(n.Buffer.from(aad));
+  decipher.setAuthTag(n.Buffer.from(tag));
+  return {
+    update: (chunk) => asBytes(decipher.update(chunk)),
+    finish() {
+      decipher.final();
+    },
+  };
+}
+
 const UTF8_DECODE_CHUNK = 1 << 20;
 
 const invalidUtf8 = () => new Error('UTF-8 inválido');
@@ -141,4 +199,43 @@ export function decodeUtf8Strict(n: NativeCrypto, bytes: Uint8Array): string {
     start = end;
   }
   return parts.join('');
+}
+
+/**
+ * Versão em fluxo do `decodeUtf8Strict`: recebe blocos de bytes e devolve o texto de cada um,
+ * segurando (no máximo 3 bytes) a sequência multibyte que ficou cortada na borda do bloco para o
+ * bloco seguinte. Cada pedaço passa pela mesma conferência estrita por ida e volta; um corte
+ * no meio de um caractere nunca é decodificado (nem vira U+FFFD). `end()` lança se o fluxo
+ * terminou no meio de uma sequência.
+ */
+export class Utf8StreamDecoder {
+  private pending: Uint8Array | null = null;
+
+  constructor(private readonly n: NativeCrypto) {}
+
+  push(chunk: Uint8Array): string {
+    let bytes = chunk;
+    if (this.pending) {
+      bytes = new Uint8Array(this.pending.length + chunk.length);
+      bytes.set(this.pending, 0);
+      bytes.set(chunk, this.pending.length);
+      this.pending = null;
+    }
+    let end = bytes.length;
+    // Último byte que NÃO é continuação (10xxxxxx), em até 3 passos: se a sequência dele não cabe
+    // no que sobrou do bloco, fica pendente. Lixo (sem líder à vista) segue e a conferência recusa.
+    for (let back = 1; back <= 3 && back <= bytes.length; back++) {
+      const b = bytes[bytes.length - back];
+      if ((b & 0xc0) === 0x80) continue;
+      const need = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 1;
+      if (need > back) end = bytes.length - back;
+      break;
+    }
+    if (end < bytes.length) this.pending = bytes.slice(end);
+    return end === 0 ? '' : decodeUtf8Strict(this.n, bytes.subarray(0, end));
+  }
+
+  end(): void {
+    if (this.pending) throw invalidUtf8();
+  }
 }

@@ -97,7 +97,9 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
     borderWidth: 1,
     borderColor: c.borderInput,
     borderRadius: 8,
-    padding: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    minHeight: 48,
     fontSize: 14,
     backgroundColor: c.bgInput,
     color: c.text,
@@ -264,7 +266,7 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
                   </XStack>
                 )}
 
-                <XStack style={{ gap: 10, justifyContent: 'flex-end', marginTop: 4 }}>
+                <XStack style={{ gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap', marginTop: 4 }}>
                   <Pressable
                     onPress={onClose}
                     disabled={busy}

@@ -594,15 +594,12 @@ async function migrateFromSecureStore(db: SQLite.SQLiteDatabase) {
   }
 }
 
-export async function getAllRecordingsMeta(): Promise<
-  Map<string, RecordingMeta>
-> {
-  const db = await getDb();
-  const rows = await db.getAllAsync<RecordingMeta>(
-    'SELECT fileName, customName, transcript, summary, templateId, patientName, durationSecs, updatedAt FROM recordings'
-  );
-  // Descriptografa campos sensíveis em paralelo
-  const decryptedRows = await Promise.all(
+const RECORDING_META_COLUMNS =
+  'fileName, customName, transcript, summary, templateId, patientName, durationSecs, updatedAt';
+
+/** Decifra (em paralelo) os campos sensíveis de linhas lidas do SQL. */
+function decryptRecordingRows(rows: RecordingMeta[]): Promise<RecordingMeta[]> {
+  return Promise.all(
     rows.map(async (r) => ({
       ...r,
       transcript:  r.transcript  ? await decrypt(r.transcript)  : null,
@@ -611,7 +608,43 @@ export async function getAllRecordingsMeta(): Promise<
       customName:  r.customName  ? await decrypt(r.customName)  : null,
     }))
   );
+}
+
+export async function getAllRecordingsMeta(): Promise<
+  Map<string, RecordingMeta>
+> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<RecordingMeta>(`SELECT ${RECORDING_META_COLUMNS} FROM recordings`);
+  const decryptedRows = await decryptRecordingRows(rows);
   return new Map(decryptedRows.map((r) => [r.fileName, r]));
+}
+
+/** fileNames de todas as gravações, em ordem de rowid (a de inserção) — só a coluna-chave, sem decifrar nada. */
+export async function getRecordingFileNames(): Promise<string[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ fileName: string }>('SELECT fileName FROM recordings ORDER BY rowid');
+  return rows.map((r) => r.fileName);
+}
+
+/**
+ * Metadados DECIFRADOS de um lote de gravações (backup em blocos: a memória cresce com o lote, não
+ * com o banco). Devolve na ordem de `fileNames`; nomes que não existem mais são omitidos.
+ * Use lotes pequenos (≤ 200): vira um `IN (?, …)` com um parâmetro por nome.
+ */
+export async function getRecordingsMetaByNames(fileNames: string[]): Promise<RecordingMeta[]> {
+  if (fileNames.length === 0) return [];
+  const db = await getDb();
+  const rows = await db.getAllAsync<RecordingMeta>(
+    `SELECT ${RECORDING_META_COLUMNS} FROM recordings WHERE fileName IN (${fileNames.map(() => '?').join(',')})`,
+    fileNames
+  );
+  const byName = new Map((await decryptRecordingRows(rows)).map((r) => [r.fileName, r]));
+  const out: RecordingMeta[] = [];
+  for (const name of fileNames) {
+    const meta = byName.get(name);
+    if (meta) out.push(meta);
+  }
+  return out;
 }
 
 /**

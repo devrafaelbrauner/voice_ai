@@ -18,25 +18,38 @@
 // módulo nativo não estiver no binário, o backup falha com mensagem clara. O formato do
 // envelope é o mesmo da implementação anterior (@noble): backups antigos abrem e novos também.
 // Limite de 50 MB (arquivo/envelope), verificado ANTES de qualquer KDF ou cifra.
+//
+// Memória (QA em aparelho: pico de ~1,3–1,4 GB com 36 MB): nada aqui mantém o arquivo, o
+// base64, os bytes e o texto ao mesmo tempo. A exportação lê o banco em lotes, serializa por
+// gravação, cifra com AES-GCM em fluxo (a tag só sai no fim: formato idêntico ao one-shot) e
+// grava o base64 por blocos num handle do expo-file-system. A restauração lê o arquivo em blocos,
+// decifra em fluxo, fatia o JSON por registro (json-slices.ts) e grava em lotes na transação
+// exclusiva. Só arquivos fora do layout do exportador usam o caminho em memória (decryptBackupText).
 
 import { Alert } from 'react-native';
 import * as Sharing from 'expo-sharing';
 import * as DocumentPicker from 'expo-document-picker';
-import { File, Paths } from 'expo-file-system';
+import { File, Paths, type FileHandle } from 'expo-file-system';
 import { getRandomValues } from 'expo-crypto';
 import {
   loadNativeCrypto,
   asBytes,
-  gcmEncrypt,
+  gcmEncryptStream,
+  gcmDecryptStream,
   gcmDecrypt,
   decodeUtf8Strict,
+  Utf8StreamDecoder,
   GCM_TAG_BYTES,
+  type GcmEncryptStream,
+  type GcmDecryptStream,
   type NativeCrypto,
 } from './native-crypto';
+import { readJsonObject, JsonSliceError, JsonNotObjectError, type JsonItem } from './json-slices';
 import type { SQLiteDatabase } from 'expo-sqlite';
 import {
   getDb,
-  getAllRecordingsMeta,
+  getRecordingFileNames,
+  getRecordingsMetaByNames,
   getCustomTemplates,
   getBackupCounts,
   notifyDataChanged,
@@ -52,6 +65,15 @@ const BACKUP_VERSION = 2;
 const FORMAT_ID = 'encrypted-backup-v2';
 const LEGACY_FORMAT_ID = 'encrypted-backup-v1';
 const MAX_BACKUP_BYTES = 50 * 1024 * 1024;
+
+// Blocos do fluxo. Plaintext em múltiplos de 3 bytes: o base64 de cada bloco se concatena sem preenchimento.
+const PLAIN_CHUNK_BYTES = 3 * 65536; // 192 KiB
+const B64_CHUNK_CHARS = 4 * 65536; // 256 KiB de base64 = 192 KiB de bytes
+/** Bytes lidos do início do arquivo para achar o cabeçalho do envelope. */
+const HEADER_PROBE_BYTES = 4096;
+/** Gravações lidas/decifradas por lote na exportação; registros validados/gravados por lote na restauração. */
+const EXPORT_BATCH = 100;
+const RESTORE_BATCH = 100;
 
 const KDF_R = 8;
 const KDF_P = 1;
@@ -201,14 +223,118 @@ function deriveKey(n: NativeCrypto, passphrase: string, salt: Uint8Array, N: num
   });
 }
 
+// ─── Exportação em blocos ────────────────────────────────────────────────────
+
+/** Destino do envelope: arquivo (handle) ou, nos testes/API em memória, uma lista de pedaços. */
+interface TextSink {
+  write(text: string): void;
+  close(): void;
+}
+
 /**
- * Serializa e cifra o payload. Lança se qualquer etapa falhar — nunca produz texto puro.
- * O tamanho do envelope é calculado e comparado com o limite de 50 MB ANTES do scrypt e da cifra.
+ * O que `sealBackup` precisa saber do payload sem tê-lo na memória: metadados do cabeçalho (stats
+ * entram no AAD, então precisam existir ANTES da primeira cifra), o tamanho exato do JSON em bytes
+ * UTF-8 (limite de 50 MB antes do KDF) e um produtor que emite esse JSON em pedaços concatenáveis.
  */
-export async function encryptBackupPayload(
-  payload: BackupPayload,
-  passphrase: string
-): Promise<string> {
+interface ExportSource {
+  exportedAt: string;
+  stats: BackupStats;
+  jsonBytes: number;
+  emit(push: (piece: string) => void): Promise<void>;
+}
+
+const DATA_CHANGED_MESSAGE = 'Os dados mudaram durante a exportação. Tente novamente.';
+/** Pedaço de texto codificado de cada vez (um array de milhões de caracteres nunca vira um único buffer). */
+const ENCODE_SLICE_CHARS = 256 * 1024;
+
+let textEncoder: TextEncoder | null = null;
+const encodeUtf8 = (s: string): Uint8Array => (textEncoder ??= new TextEncoder()).encode(s);
+
+/** Percorre `text` em fatias que não cortam um par substituto UTF-16 ao meio. */
+function forEachSlice(text: string, fn: (slice: string) => void): void {
+  if (text.length <= ENCODE_SLICE_CHARS) {
+    fn(text);
+    return;
+  }
+  for (let from = 0; from < text.length; ) {
+    let to = Math.min(from + ENCODE_SLICE_CHARS, text.length);
+    const last = text.charCodeAt(to - 1);
+    if (to < text.length && last >= 0xd800 && last <= 0xdbff) to--; // alto sem o baixo: leva junto no próximo
+    fn(text.slice(from, to));
+    from = to;
+  }
+}
+
+function utf8Length(text: string): number {
+  let bytes = 0;
+  forEachSlice(text, (s) => { bytes += encodeUtf8(s).length; });
+  return bytes;
+}
+
+/**
+ * Cifra o JSON recebido aos pedaços (AES-GCM em fluxo) e entrega o ciphertext em base64 ao destino
+ * a cada PLAIN_CHUNK_BYTES. Os blocos têm múltiplo de 3 bytes, então o base64 de cada um se
+ * concatena sem preenchimento e o resultado é idêntico ao base64 do ciphertext inteiro.
+ */
+class SealedWriter {
+  private readonly cipher: GcmEncryptStream;
+  private readonly stage = new Uint8Array(PLAIN_CHUNK_BYTES);
+  private filled = 0;
+  plainBytes = 0;
+
+  constructor(
+    private readonly n: NativeCrypto,
+    key: Uint8Array,
+    nonce: Uint8Array,
+    aad: Uint8Array,
+    private readonly sink: TextSink
+  ) {
+    this.cipher = gcmEncryptStream(n, key, nonce, aad);
+  }
+
+  push(text: string): void {
+    forEachSlice(text, (slice) => {
+      const bytes = encodeUtf8(slice);
+      this.plainBytes += bytes.length;
+      if (this.plainBytes > MAX_BACKUP_BYTES) throw new Error(DATA_CHANGED_MESSAGE);
+      for (let off = 0; off < bytes.length; ) {
+        const take = Math.min(bytes.length - off, this.stage.length - this.filled);
+        this.stage.set(bytes.subarray(off, off + take), this.filled);
+        this.filled += take;
+        off += take;
+        if (this.filled === this.stage.length) {
+          this.sink.write(this.n.fromByteArray(this.cipher.update(this.stage)));
+          this.filled = 0;
+        }
+      }
+      bytes.fill(0);
+    });
+  }
+
+  /** Fecha o GCM; o último pedaço (resto do ciphertext + tag) é o único que pode ter preenchimento base64. */
+  finish(expectedBytes: number): void {
+    if (this.plainBytes !== expectedBytes) throw new Error(DATA_CHANGED_MESSAGE);
+    const last = this.filled > 0 ? this.cipher.update(this.stage.subarray(0, this.filled)) : new Uint8Array(0);
+    const tail = this.cipher.finish();
+    const out = new Uint8Array(last.length + tail.length);
+    out.set(last, 0);
+    out.set(tail, last.length);
+    this.sink.write(this.n.fromByteArray(out));
+    this.stage.fill(0);
+  }
+}
+
+/**
+ * Monta e grava o envelope v2 em fluxo: cabeçalho, ciphertext em base64 por blocos, fecha o JSON.
+ * Lança se qualquer etapa falhar — nunca produz texto puro. O tamanho do envelope é calculado e
+ * comparado com o limite de 50 MB ANTES do scrypt e da cifra; `openSink` só roda depois do KDF
+ * (falha antes disso não deixa arquivo). Formato idêntico ao da versão em memória (@noble).
+ */
+async function sealBackup(
+  source: ExportSource,
+  passphrase: string,
+  openSink: (n: NativeCrypto) => TextSink
+): Promise<void> {
   const n = loadNativeCrypto();
   const salt = getRandomValues(new Uint8Array(SALT_BYTES));
   const nonce = getRandomValues(new Uint8Array(NONCE_BYTES));
@@ -220,23 +346,11 @@ export async function encryptBackupPayload(
     salt_b64: n.fromByteArray(salt),
   };
   const nonceB64 = n.fromByteArray(nonce);
-  const { doctor, recordings, customTemplates } = payload;
-  const plaintext = new TextEncoder().encode(
-    JSON.stringify({
-      version: payload.version,
-      app: payload.app,
-      exportedAt: payload.exportedAt,
-      doctor,
-      recordings,
-      customTemplates,
-    })
-  );
-
   const header: EncryptedBackupEnvelope = {
     _voiceai: FORMAT_ID,
     version: BACKUP_VERSION,
-    exportedAt: payload.exportedAt,
-    stats: payload.stats,
+    exportedAt: source.exportedAt,
+    stats: source.stats,
     kdf,
     cipher: { name: 'aes-256-gcm', nonce_b64: nonceB64 },
     data_b64: '',
@@ -244,38 +358,70 @@ export async function encryptBackupPayload(
   // Tamanho exato do arquivo final: cabeçalho + base64(ciphertext + tag). Falha aqui, em
   // milissegundos, em vez de depois de gastar scrypt + cifra num arquivo impossível de restaurar.
   const headerJson = JSON.stringify(header);
-  const envelopeChars = headerJson.length + 4 * Math.ceil((plaintext.length + GCM_TAG_BYTES) / 3);
+  const envelopeChars = headerJson.length + 4 * Math.ceil((source.jsonBytes + GCM_TAG_BYTES) / 3);
   if (envelopeChars > MAX_BACKUP_BYTES) {
-    plaintext.fill(0);
     throw new Error('O backup passaria de 50 MB e não poderia ser restaurado. Exclua gravações antigas antes de exportar.');
   }
 
   const key = await deriveKey(n, passphrase, salt, kdf.N);
-  let sealed: Uint8Array;
+  let sink: TextSink | null = null;
   try {
-    sealed = gcmEncrypt(n, key, nonce, plaintext, buildAad(payload.exportedAt, payload.stats, kdf, nonceB64));
+    sink = openSink(n);
+    // `data_b64` é a última chave do cabeçalho (vazia) e o base64 nunca precisa de escape JSON: o
+    // arquivo é cabeçalho + base64 em blocos + `"}`, idêntico a JSON.stringify({ ...header, data_b64 }).
+    sink.write(`${headerJson.slice(0, -DATA_B64_EMPTY_TAIL.length)}"data_b64":"`);
+    const writer = new SealedWriter(n, key, nonce, buildAad(source.exportedAt, source.stats, kdf, nonceB64), sink);
+    await source.emit((piece) => writer.push(piece));
+    writer.finish(source.jsonBytes);
+    sink.write('"}');
   } finally {
     key.fill(0);
-    plaintext.fill(0);
+    sink?.close();
   }
-  // `data_b64` é a última chave do cabeçalho (vazia) e o base64 nunca precisa de escape JSON: monta o
-  // arquivo por concatenação em vez de um segundo JSON.stringify sobre ~48 MB (uma cópia a menos).
-  // Resultado idêntico a JSON.stringify({ ...header, data_b64 }).
-  return `${headerJson.slice(0, -DATA_B64_EMPTY_TAIL.length)}"data_b64":"${n.fromByteArray(sealed)}"}`;
+}
+
+/** `{"version":…,"recordings":[` — mesma ordem de chaves e mesmo texto de JSON.stringify do payload inteiro. */
+const payloadHead = (version: number, app: string, exportedAt: string, doctor: DoctorProfile | null): string =>
+  `{"version":${JSON.stringify(version)},"app":${JSON.stringify(app)},"exportedAt":${JSON.stringify(exportedAt)},` +
+  `"doctor":${JSON.stringify(doctor ?? null)},"recordings":[`;
+const payloadTail = (customTemplates: CustomTemplate[]): string =>
+  `],"customTemplates":${JSON.stringify(customTemplates)}}`;
+
+/**
+ * Cifra um payload JÁ montado em memória e devolve o arquivo como string (dados pequenos e
+ * testes). O app exporta por `exportBackup`, que lê o banco em lotes e escreve em blocos; os dois
+ * usam o mesmo núcleo (`sealBackup`) e geram o mesmo formato.
+ */
+export async function encryptBackupPayload(
+  payload: BackupPayload,
+  passphrase: string
+): Promise<string> {
+  const { doctor, recordings, customTemplates } = payload;
+  const head = payloadHead(payload.version, payload.app, payload.exportedAt, doctor);
+  const tail = payloadTail(customTemplates);
+  let jsonBytes = utf8Length(head) + utf8Length(tail) + Math.max(0, recordings.length - 1);
+  for (const r of recordings) jsonBytes += utf8Length(JSON.stringify(r));
+  const source: ExportSource = {
+    exportedAt: payload.exportedAt,
+    stats: payload.stats,
+    jsonBytes,
+    emit: async (push) => {
+      push(head);
+      recordings.forEach((r, i) => push(i === 0 ? JSON.stringify(r) : `,${JSON.stringify(r)}`));
+      push(tail);
+    },
+  };
+  const pieces: string[] = [];
+  await sealBackup(source, passphrase, () => ({ write: (text) => { pieces.push(text); }, close: () => {} }));
+  return pieces.join('');
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** Valida o envelope (estrutura + allow-list do KDF). Não toca em dados sensíveis. */
-function parseEnvelope(text: string): EncryptedBackupEnvelope {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    throw new Error('Arquivo inválido: não é um backup do Voice AI.');
-  }
+/** Valida o envelope já parseado (estrutura + allow-list do KDF). Não toca em dados sensíveis. */
+function validateEnvelope(raw: unknown): EncryptedBackupEnvelope {
   if (!isRecord(raw)) throw new Error('Arquivo inválido: não é um backup do Voice AI.');
   if (raw._voiceai === LEGACY_FORMAT_ID) {
     throw new Error('Este backup usa o formato antigo (v1), sem senha, e não pode ser restaurado. Gere um novo backup no aparelho de origem.');
@@ -301,21 +447,39 @@ function parseEnvelope(text: string): EncryptedBackupEnvelope {
   return raw as unknown as EncryptedBackupEnvelope;
 }
 
+function parseEnvelope(text: string): EncryptedBackupEnvelope {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error('Arquivo inválido: não é um backup do Voice AI.');
+  }
+  return validateEnvelope(raw);
+}
+
+/** Salt, nonce e AAD do cabeçalho; recusa base64/tamanhos inválidos ANTES do KDF. */
+function envelopeParams(n: NativeCrypto, env: EncryptedBackupEnvelope) {
+  const salt = base64ToBytes(n, env.kdf.salt_b64);
+  const nonce = base64ToBytes(n, env.cipher.nonce_b64);
+  if (salt.length !== SALT_BYTES || nonce.length !== NONCE_BYTES) {
+    throw new Error('Arquivo de backup incompleto ou corrompido.');
+  }
+  return { salt, nonce, aad: buildAad(env.exportedAt, env.stats, env.kdf, env.cipher.nonce_b64) };
+}
+
+const CORRUPT_CONTENT_MESSAGE = 'Conteúdo do backup corrompido.';
+
 /**
- * Decifra o envelope e devolve o JSON do payload. Senha errada e arquivo adulterado
- * são indistinguíveis no GCM e resultam em BackupPassphraseError.
+ * Decifra o envelope (texto inteiro) e devolve o payload parseado. Senha errada e arquivo adulterado
+ * são indistinguíveis no GCM e resultam em BackupPassphraseError. Caminho em memória: o restore
+ * usa o fluxo em blocos (`restoreBackup`) e só cai aqui para arquivo fora do layout do exportador.
  * `env.data_b64` é zerado assim que vira bytes (libera a cópia de dezenas de MB).
  */
 export async function decryptBackupText(text: string, passphrase: string): Promise<unknown> {
   if (text.length > MAX_BACKUP_BYTES) throw new Error(FILE_TOO_BIG_MESSAGE); // antes de parsear/derivar
   const env = parseEnvelope(text);
   const n = loadNativeCrypto();
-  const salt = base64ToBytes(n, env.kdf.salt_b64);
-  const nonce = base64ToBytes(n, env.cipher.nonce_b64);
-  if (salt.length !== SALT_BYTES || nonce.length !== NONCE_BYTES) {
-    throw new Error('Arquivo de backup incompleto ou corrompido.');
-  }
-  const aad = buildAad(env.exportedAt, env.stats, env.kdf, env.cipher.nonce_b64);
+  const { salt, nonce, aad } = envelopeParams(n, env);
   // `sealed`/`plain` (dezenas de MB cada) são soltos assim que deixam de ser usados: a referência
   // some antes do JSON.parse, que é onde o pico de memória acontece.
   let sealed: Uint8Array | null = base64ToBytes(n, env.data_b64);
@@ -341,7 +505,7 @@ export async function decryptBackupText(text: string, passphrase: string): Promi
   try {
     json = decodeUtf8Strict(n, plain); // UTF-8 estrito, nativo (sem TextDecoder em JS)
   } catch {
-    throw new Error('Conteúdo do backup corrompido.');
+    throw new Error(CORRUPT_CONTENT_MESSAGE);
   } finally {
     plain.fill(0);
     plain = null;
@@ -349,7 +513,146 @@ export async function decryptBackupText(text: string, passphrase: string): Promi
   try {
     return JSON.parse(json);
   } catch {
-    throw new Error('Conteúdo do backup corrompido.');
+    throw new Error(CORRUPT_CONTENT_MESSAGE);
+  }
+}
+
+// ─── Arquivo cifrado lido em blocos (restore) ────────────────────────────────
+
+/** Abertura do campo no arquivo gerado pelo exportador (cabeçalho compacto, `data_b64` por último). */
+const DATA_B64_OPEN = '"data_b64":"';
+
+interface SealedFile {
+  env: EncryptedBackupEnvelope;
+  handle: FileHandle;
+  /** Byte onde começa o base64 do ciphertext||tag. */
+  dataStart: number;
+  /** Quantos caracteres base64 há até as aspas finais. */
+  dataChars: number;
+}
+
+const isJsonWhitespace = (b: number) => b === 0x20 || b === 0x0a || b === 0x0d || b === 0x09;
+
+function latin1(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return s;
+}
+
+/**
+ * Abre o arquivo e localiza o base64 SEM ler o conteúdo: cabeçalho nos primeiros KB (até
+ * `"data_b64":"`) e as aspas finais no fim. Devolve null se o arquivo não tem o layout do
+ * exportador (cabeçalho grande/reformatado, outras chaves depois do dado, não é JSON): o chamador
+ * usa o caminho em memória, que aceita qualquer JSON válido. Erros de VALIDAÇÃO (v1, allow-list do
+ * KDF…) lançam daqui, antes de qualquer KDF. Quem recebe o SealedFile fecha o handle.
+ */
+function openSealedFile(file: File): SealedFile | null {
+  const handle = file.open();
+  let keep = false;
+  try {
+    const size = handle.size ?? 0;
+    handle.offset = 0;
+    const head = latin1(handle.readBytes(Math.min(size, HEADER_PROBE_BYTES)));
+    const at = head.indexOf(DATA_B64_OPEN);
+    if (at < 0 || /[^\x00-\x7f]/.test(head.slice(0, at))) return null;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(`${head.slice(0, at)}"data_b64":""}`);
+    } catch {
+      return null;
+    }
+    const dataStart = at + DATA_B64_OPEN.length;
+    const tailLen = Math.min(size - dataStart, 64);
+    if (tailLen < 2) return null;
+    handle.offset = size - tailLen;
+    const tail = handle.readBytes(tailLen);
+    let i = tail.length - 1;
+    while (i >= 0 && isJsonWhitespace(tail[i])) i--;
+    if (i < 0 || tail[i] !== 0x7d) return null; // }
+    i--;
+    while (i >= 0 && isJsonWhitespace(tail[i])) i--;
+    if (i < 0 || tail[i] !== 0x22) return null; // "
+    const env = validateEnvelope(raw);
+    keep = true;
+    return { env, handle, dataStart, dataChars: size - tailLen + i - dataStart };
+  } finally {
+    if (!keep) handle.close();
+  }
+}
+
+/** Lê `chars` caracteres base64 da posição atual do handle e decodifica (nativo, estrito). */
+function readBase64Bytes(n: NativeCrypto, handle: FileHandle, chars: number): Uint8Array {
+  const raw = handle.readBytes(chars);
+  if (raw.length !== chars) throw new Error('Arquivo de backup incompleto ou corrompido.');
+  return base64ToBytes(n, n.bufferToString(raw.buffer as ArrayBuffer, 'utf8', raw.byteOffset, raw.byteOffset + raw.length));
+}
+
+/**
+ * A tag GCM (últimos 16 bytes do ciphertext||tag) e o tamanho do ciphertext, lidos das últimas
+ * 32 colunas base64 — a tag é conhecida antes do primeiro bloco, como no `setAuthTag` do one-shot.
+ * Recusa antes do KDF base64 torto e arquivo curto demais para conter a tag.
+ */
+function readSealedTail(n: NativeCrypto, sealed: SealedFile): { tag: Uint8Array; cipherBytes: number } {
+  const { handle, dataStart, dataChars } = sealed;
+  if (dataChars % 4 !== 0) throw new Error('Arquivo de backup corrompido (base64 inválido).');
+  if (dataChars < 24) throw new Error('Arquivo de backup incompleto ou corrompido.'); // < 16 bytes
+  const window = Math.min(32, dataChars);
+  handle.offset = dataStart + dataChars - window;
+  const bytes = readBase64Bytes(n, handle, window);
+  if (bytes.length < GCM_TAG_BYTES) throw new Error('Arquivo de backup incompleto ou corrompido.');
+  const padding = (window / 4) * 3 - bytes.length;
+  return { tag: bytes.slice(bytes.length - GCM_TAG_BYTES), cipherBytes: (dataChars / 4) * 3 - padding - GCM_TAG_BYTES };
+}
+
+/** Decifra o ciphertext do arquivo em blocos de B64_CHUNK_CHARS; só uma janela do arquivo na memória por vez. */
+class SealedReader {
+  private readonly decipher: GcmDecryptStream;
+  private charsLeft: number;
+  private bytesLeft: number;
+  private finished = false;
+
+  constructor(
+    private readonly n: NativeCrypto,
+    private readonly sealed: SealedFile,
+    key: Uint8Array,
+    nonce: Uint8Array,
+    aad: Uint8Array,
+    tag: Uint8Array,
+    cipherBytes: number
+  ) {
+    this.decipher = gcmDecryptStream(n, key, nonce, aad, tag);
+    this.charsLeft = sealed.dataChars;
+    this.bytesLeft = cipherBytes;
+    sealed.handle.offset = sealed.dataStart;
+  }
+
+  /**
+   * Próximo bloco de plaintext (não vazio), ou null depois de CONFIRMAR a tag: tag errada = senha
+   * errada ou arquivo adulterado (BackupPassphraseError). O plaintext devolvido antes do null ainda
+   * não é autêntico — ver GcmDecryptStream.
+   */
+  next(): Uint8Array | null {
+    for (;;) {
+      if (this.charsLeft === 0) {
+        if (!this.finished) {
+          this.finished = true;
+          try {
+            this.decipher.finish();
+          } catch {
+            throw new BackupPassphraseError();
+          }
+        }
+        return null;
+      }
+      const chars = Math.min(B64_CHUNK_CHARS, this.charsLeft);
+      const bytes = readBase64Bytes(this.n, this.sealed.handle, chars);
+      this.charsLeft -= chars;
+      const take = Math.min(bytes.length, this.bytesLeft); // o último bloco traz também a tag
+      if (take === 0) continue;
+      this.bytesLeft -= take;
+      const plain = this.decipher.update(take === bytes.length ? bytes : bytes.subarray(0, take));
+      if (plain.length > 0) return plain;
+    }
   }
 }
 
@@ -365,72 +668,146 @@ function readable(value: string | null, onBad: () => void): string | null {
   return value;
 }
 
-/**
- * Monta o payload a partir do armazenamento local (decifrado, em memória).
- * Campos que não decifram não entram; cada item afetado é contado UMA vez em unreadableItems.
- */
-export async function buildBackup(): Promise<BackupPayload> {
-  const metaMap = await getAllRecordingsMeta();
-  const doctor = await getDoctorProfile().catch(() => null);
-  const templates = await getCustomTemplates().catch(() => []);
+type ExportRecording = BackupPayload['recordings'][number];
 
-  const unreadable = new Set<string>();
-  const recordings: BackupPayload['recordings'] = [];
-  const patientSet = new Set<string>();
-  let transcribed = 0;
-  let processed = 0;
-  let finalized = 0;
+const createdAtOf = (fileName: string): string | null => {
+  const match = fileName.match(/recording_(\d+)\.m4a/);
+  return match ? new Date(parseInt(match[1])).toISOString() : null;
+};
 
-  for (const [fileName, meta] of metaMap.entries()) {
-    const bad = () => { unreadable.add(`r:${fileName}`); };
-    const clean = {
-      ...meta,
-      customName: readable(meta.customName, bad),
-      transcript: readable(meta.transcript, bad),
-      summary: readable(meta.summary, bad),
-      patientName: readable(meta.patientName, bad),
-    };
-    const match = fileName.match(/recording_(\d+)\.m4a/);
-    const createdAt = match ? new Date(parseInt(match[1])).toISOString() : null;
-    recordings.push({ ...clean, createdAt });
+/** Gravação pronta para o arquivo: campo que não decifrou vira null e marca o item como ilegível (uma vez). */
+function cleanRecording(meta: RecordingMeta): { rec: ExportRecording; unreadable: boolean } {
+  let unreadable = false;
+  const bad = () => { unreadable = true; };
+  const rec = {
+    ...meta,
+    customName: readable(meta.customName, bad),
+    transcript: readable(meta.transcript, bad),
+    summary: readable(meta.summary, bad),
+    patientName: readable(meta.patientName, bad),
+    createdAt: createdAtOf(meta.fileName),
+  };
+  return { rec, unreadable };
+}
 
-    if (clean.transcript) transcribed++;
-    if (clean.summary) processed++;
-    if (clean.summary && clean.transcript) finalized++;
-    if (clean.patientName) patientSet.add(clean.patientName);
+/** Contagens do cabeçalho (stats) e do tamanho do JSON, acumuladas gravação a gravação. */
+interface Tally {
+  recordings: number;
+  transcribed: number;
+  processed: number;
+  finalized: number;
+  unreadable: number;
+  bytes: number;
+  patients: Set<string>;
+}
+
+const newTally = (): Tally => ({
+  recordings: 0, transcribed: 0, processed: 0, finalized: 0, unreadable: 0, bytes: 0, patients: new Set(),
+});
+
+/** Contabiliza a gravação e devolve o JSON dela (com a vírgula separadora, exceto a primeira). */
+function tallyRecording(t: Tally, rec: ExportRecording, unreadable: boolean): string {
+  t.recordings++;
+  if (rec.transcript) t.transcribed++;
+  if (rec.summary) t.processed++;
+  if (rec.summary && rec.transcript) t.finalized++;
+  if (rec.patientName) t.patients.add(rec.patientName);
+  if (unreadable) t.unreadable++;
+  const json = (t.recordings > 1 ? ',' : '') + JSON.stringify(rec);
+  t.bytes += utf8Length(json);
+  return json;
+}
+
+const statsOf = (t: Tally): BackupStats => ({
+  totalRecordings: t.recordings,
+  transcribed: t.transcribed,
+  processed: t.processed,
+  finalized: t.finalized,
+  uniquePatients: t.patients.size,
+});
+
+const sameTally = (a: Tally, b: Tally): boolean =>
+  a.recordings === b.recordings && a.transcribed === b.transcribed && a.processed === b.processed &&
+  a.finalized === b.finalized && a.unreadable === b.unreadable && a.bytes === b.bytes &&
+  a.patients.size === b.patients.size;
+
+/** Lê e decifra as gravações em lotes de EXPORT_BATCH: a memória cresce com o lote, não com o banco. */
+async function scanRecordings(
+  fileNames: string[],
+  visit: (rec: ExportRecording, unreadable: boolean) => void
+): Promise<void> {
+  for (let i = 0; i < fileNames.length; i += EXPORT_BATCH) {
+    for (const meta of await getRecordingsMetaByNames(fileNames.slice(i, i + EXPORT_BATCH))) {
+      const { rec, unreadable } = cleanRecording(meta);
+      visit(rec, unreadable);
+    }
   }
+}
 
-  recordings.sort((a, b) => {
-    const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-    const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-    return tb - ta;
-  });
+interface ExportPlan {
+  source: ExportSource;
+  recordings: number;
+  templates: number;
+  /** Itens (gravações + templates) com algum campo ilegível — cada item conta uma vez. */
+  unreadable: number;
+}
 
+/**
+ * Prepara a exportação SEM montar o payload: passe 1 sobre o banco (em lotes) só para contar —
+ * stats e tamanho exato do JSON têm de estar no cabeçalho autenticado antes da primeira cifra e o
+ * limite de 50 MB vale antes do KDF. O passe 2 (`source.emit`) relê o banco, serializa e cifra
+ * aos pedaços; se os dados mudaram entre os passes, a exportação é abortada (cabeçalho e
+ * conteúdo precisam ser coerentes). Gravações que não decifram não entram; templates idem.
+ */
+async function planExport(): Promise<ExportPlan> {
+  const exportedAt = new Date().toISOString();
+  const doctor = await getDoctorProfile().catch(() => null);
+  const rawTemplates = await getCustomTemplates().catch(() => []);
+
+  let unreadableTemplates = 0;
   const customTemplates: CustomTemplate[] = [];
-  for (const t of templates) {
-    const bad = () => { unreadable.add(`t:${t.id}`); };
-    const name = readable(t.name, bad);
-    const systemPrompt = readable(t.systemPrompt, bad);
-    const description = readable(t.description, bad);
+  for (const t of rawTemplates) {
+    let bad = false;
+    const mark = () => { bad = true; };
+    const name = readable(t.name, mark);
+    const systemPrompt = readable(t.systemPrompt, mark);
+    const description = readable(t.description, mark);
+    if (bad) unreadableTemplates++;
     if (name === null || systemPrompt === null) continue; // campos obrigatórios ilegíveis
     customTemplates.push({ ...t, name, systemPrompt, description });
   }
 
-  return {
-    version: BACKUP_VERSION,
-    exportedAt: new Date().toISOString(),
-    app: 'voice-ai-recorder',
-    doctor,
-    recordings,
-    customTemplates,
-    unreadableItems: unreadable.size,
-    stats: {
-      totalRecordings: recordings.length,
-      transcribed,
-      processed,
-      finalized,
-      uniquePatients: patientSet.size,
+  // Mais recentes primeiro (empate: ordem de inserção; o sort do motor é estável).
+  const fileNames = (await getRecordingFileNames())
+    .map((name) => {
+      const createdAt = createdAtOf(name);
+      return { name, time: createdAt ? Date.parse(createdAt) : 0 };
+    })
+    .sort((a, b) => b.time - a.time)
+    .map((x) => x.name);
+
+  const first = newTally();
+  await scanRecordings(fileNames, (rec, unreadable) => { tallyRecording(first, rec, unreadable); });
+
+  const head = payloadHead(BACKUP_VERSION, 'voice-ai-recorder', exportedAt, doctor);
+  const tail = payloadTail(customTemplates);
+  const source: ExportSource = {
+    exportedAt,
+    stats: statsOf(first),
+    jsonBytes: utf8Length(head) + utf8Length(tail) + first.bytes,
+    emit: async (push) => {
+      push(head);
+      const second = newTally();
+      await scanRecordings(fileNames, (rec, unreadable) => { push(tallyRecording(second, rec, unreadable)); });
+      if (!sameTally(first, second)) throw new Error(DATA_CHANGED_MESSAGE);
+      push(tail);
     },
+  };
+  return {
+    source,
+    recordings: first.recordings,
+    templates: customTemplates.length,
+    unreadable: first.unreadable + unreadableTemplates,
   };
 }
 
@@ -444,26 +821,40 @@ export interface ExportOutcome {
 
 /**
  * Exporta o backup cifrado com a passphrase e abre a folha de compartilhamento.
- * Lança Error (mensagem em pt-BR) em qualquer falha; nunca grava texto puro.
+ * Lança Error (mensagem em pt-BR) em qualquer falha; nunca grava texto puro. O arquivo é
+ * escrito em blocos (handle do expo-file-system): nunca existe a string/bytes do arquivo inteiro.
  */
 export async function exportBackup(passphrase: string): Promise<ExportOutcome> {
   const weak = validatePassphrase(passphrase);
   if (weak) throw new Error(weak);
 
-  const payload = await buildBackup();
-  const outcome = {
-    recordings: payload.recordings.length,
-    templates: payload.customTemplates.length,
-    unreadable: payload.unreadableItems,
-  };
+  const plan = await planExport();
+  const outcome = { recordings: plan.recordings, templates: plan.templates, unreadable: plan.unreadable };
   if (outcome.recordings === 0 && outcome.templates === 0) {
     return { status: 'empty', ...outcome };
   }
 
-  const fileContent = await encryptBackupPayload(payload, passphrase);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const file = createExportFile(`voice-ai-recorder-backup-${stamp}.enc.json`);
-  file.write(fileContent);
+  const created: File[] = [];
+  try {
+    await sealBackup(plan.source, passphrase, (n) => {
+      const target = createExportFile(`voice-ai-recorder-backup-${stamp}.enc.json`);
+      created.push(target);
+      const handle = target.open();
+      return {
+        write: (text) => handle.writeBytes(new Uint8Array(n.stringToBuffer(text, 'utf8'))),
+        close: () => handle.close(),
+      };
+    });
+  } catch (err) {
+    try {
+      created[0]?.delete(); // não deixa no cache um arquivo parcial
+    } catch {
+      // best-effort
+    }
+    throw err;
+  }
+  const file = created[0];
 
   if (await Sharing.isAvailableAsync()) {
     await Sharing.shareAsync(file.uri, {
@@ -632,68 +1023,109 @@ type TxnLike = Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>;
 
 const nonEmpty = (...vals: (string | null | undefined)[]) => vals.some((v) => typeof v === 'string' && v !== '');
 
+const NOT_RECOGNIZED_MESSAGE = 'Conteúdo do backup não reconhecido.';
+const STREAMED_KEYS: ReadonlySet<string> = new Set(['recordings', 'customTemplates']);
+
+/** Entrega os itens do payload (campos e elementos dos arrays de registros) na ordem do documento. */
+type RestoreSource = (onItem: (item: JsonItem) => void | Promise<void>) => Promise<void>;
+
+/** Plaintext do envelope como texto, em pedaços: UTF-8 estrito sem partir caracteres na borda do bloco. */
+class PlainTextReader {
+  private readonly decoder: Utf8StreamDecoder;
+  private ended = false;
+
+  constructor(n: NativeCrypto, private readonly reader: SealedReader) {
+    this.decoder = new Utf8StreamDecoder(n);
+  }
+
+  pull(): string | null {
+    while (!this.ended) {
+      const chunk = this.reader.next();
+      if (chunk === null) {
+        this.ended = true;
+        try {
+          this.decoder.end();
+        } catch {
+          throw new Error(CORRUPT_CONTENT_MESSAGE);
+        }
+        return null;
+      }
+      let text: string;
+      try {
+        text = this.decoder.push(chunk);
+      } catch {
+        throw new Error(CORRUPT_CONTENT_MESSAGE);
+      } finally {
+        chunk.fill(0);
+      }
+      if (text.length > 0) return text;
+    }
+    return null;
+  }
+}
+
+/** Fonte em fluxo: decifra, decodifica e fatia o JSON por registro (memória ∝ um registro + um bloco). */
+function streamedSource(n: NativeCrypto, reader: SealedReader): RestoreSource {
+  return async (onItem) => {
+    const text = new PlainTextReader(n, reader);
+    try {
+      await readJsonObject(() => text.pull(), STREAMED_KEYS, onItem);
+    } catch (err) {
+      if (err instanceof JsonSliceError) throw new Error(CORRUPT_CONTENT_MESSAGE);
+      if (err instanceof JsonNotObjectError) throw new Error(NOT_RECOGNIZED_MESSAGE);
+      throw err;
+    }
+  };
+}
+
+/** Fonte sobre um payload já parseado em memória (arquivo fora do layout do exportador). */
+function parsedSource(parsed: Record<string, unknown>): RestoreSource {
+  return async (onItem) => {
+    for (const [key, value] of Object.entries(parsed)) {
+      if (STREAMED_KEYS.has(key) && Array.isArray(value)) {
+        for (const element of value) await onItem({ key, value: element, element: true });
+      } else {
+        await onItem({ key, value, element: false });
+      }
+    }
+  };
+}
+
 /**
- * Restaura o conteúdo de um arquivo de backup. Itens que já existem COM conteúdo no
- * aparelho são mantidos (nada é sobrescrito); linha existente porém vazia não conta
- * como "já existia". Tudo é aplicado numa transação exclusiva: ou entra tudo ou nada.
+ * Aplica os itens numa transação exclusiva, em lotes de RESTORE_BATCH registros: cada lote é
+ * validado, só então recifrado com a chave deste aparelho e gravado, e solto antes do próximo.
+ * Ou entra tudo ou nada: qualquer falha (inclusive JSON ou tag ruim no meio do fluxo) desfaz o que
+ * os lotes anteriores já gravaram.
  */
-export async function restoreBackup(uri: string, passphrase: string): Promise<RestoreResult> {
-  let succeeded = false;
-  try {
-    const file = new File(uri);
-    if (!file.exists) throw new Error('Arquivo não encontrado.');
-    if (file.size > MAX_BACKUP_BYTES) throw new Error(FILE_TOO_BIG_MESSAGE); // antes de ler/derivar
-    const text = await file.text();
+async function applyBackupItems(source: RestoreSource): Promise<RestoreResult> {
+  let restoredRecordings = 0;
+  let restoredTemplates = 0;
+  let alreadyPresent = 0;
+  let unreadable = 0;
+  let version: unknown;
+  let app: unknown;
+  let doctorRaw: unknown;
+  const now = new Date().toISOString();
 
-    const parsed = await decryptBackupText(text, passphrase);
-    if (!isRecord(parsed) || parsed.version !== BACKUP_VERSION || parsed.app !== 'voice-ai-recorder') {
-      throw new Error('Conteúdo do backup não reconhecido.');
-    }
-    const rawRecordings = Array.isArray(parsed.recordings) ? parsed.recordings : [];
-    const rawTemplates = Array.isArray(parsed.customTemplates) ? parsed.customTemplates : [];
+  // Carrega a chave do aparelho (SecureStore) fora da transação exclusiva: dentro dela o encrypt
+  // só faz cifra nativa síncrona (promessas já resolvidas).
+  await encrypt('');
 
-    let unreadable = 0;
-    const recordings: RestoreRecording[] = [];
-    for (const r of rawRecordings) {
-      const s = sanitizeRecording(r);
-      if (s) recordings.push(s);
-      else unreadable++;
-    }
-    const templates: RestoreTemplate[] = [];
-    for (const t of rawTemplates) {
-      const s = sanitizeTemplate(t);
-      if (s) templates.push(s);
-      else unreadable++;
-    }
+  const encOpt = (v: string | null) => (v ? encrypt(v) : Promise.resolve(null));
 
-    // Recifra com a chave DESTE aparelho ANTES de abrir a transação (encrypt é assíncrono
-    // e a transação exclusiva não deve ficar aberta esperando cifra).
-    const encOpt = (v: string | null) => (v ? encrypt(v) : Promise.resolve(null));
-    const encRecordings: RestoreRecording[] = [];
-    for (const r of recordings) {
-      const [customName, transcript, summary, patientName] = await Promise.all([
-        encOpt(r.customName), encOpt(r.transcript), encOpt(r.summary), encOpt(r.patientName),
-      ]);
-      encRecordings.push({ ...r, customName, transcript, summary, patientName });
-    }
-    const encTemplates: RestoreTemplate[] = [];
-    for (const t of templates) {
-      const [name, description, systemPrompt] = await Promise.all([
-        encrypt(t.name), encOpt(t.description), encrypt(t.systemPrompt),
-      ]);
-      encTemplates.push({ ...t, name, description, systemPrompt });
-    }
+  const apply = async (txn: TxnLike) => {
+    restoredRecordings = 0;
+    restoredTemplates = 0;
+    alreadyPresent = 0;
+    unreadable = 0;
+    version = app = doctorRaw = undefined;
+    let recordings: RestoreRecording[] = [];
+    let templates: RestoreTemplate[] = [];
 
-    let restoredRecordings = 0;
-    let restoredTemplates = 0;
-    let alreadyPresent = 0;
-    const now = new Date().toISOString();
-
-    const apply = async (txn: TxnLike) => {
-      restoredRecordings = 0;
-      restoredTemplates = 0;
-      alreadyPresent = 0;
-      for (const r of encRecordings) {
+    const flushRecordings = async () => {
+      const batch = recordings;
+      recordings = [];
+      for (const r of batch) {
         const existing = await txn.getFirstAsync<{
           customName: string | null; transcript: string | null; summary: string | null;
           templateId: string | null; patientName: string | null;
@@ -705,17 +1137,25 @@ export async function restoreBackup(uri: string, passphrase: string): Promise<Re
           alreadyPresent++;
           continue;
         }
+        const [customName, transcript, summary, patientName] = await Promise.all([
+          encOpt(r.customName), encOpt(r.transcript), encOpt(r.summary), encOpt(r.patientName),
+        ]);
         await txn.runAsync(
           `INSERT OR REPLACE INTO recordings
              (fileName, customName, transcript, summary, templateId, patientName, durationSecs, updatedAt)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [r.fileName, r.customName, r.transcript, r.summary, r.templateId, r.patientName, r.durationSecs, r.updatedAt ?? now]
+          [r.fileName, customName, transcript, summary, r.templateId, patientName, r.durationSecs, r.updatedAt ?? now]
         );
         // Re-criação explícita: o item restaurado não pode ser tratado como excluído.
         await txn.runAsync(`DELETE FROM pending_deletions WHERE kind = 'recording' AND key = ?`, [r.fileName]);
         restoredRecordings++;
       }
-      for (const t of encTemplates) {
+    };
+
+    const flushTemplates = async () => {
+      const batch = templates;
+      templates = [];
+      for (const t of batch) {
         const existing = await txn.getFirstAsync<{ name: string | null; description: string | null; systemPrompt: string | null }>(
           'SELECT name, description, systemPrompt FROM custom_templates WHERE id = ?',
           [t.id]
@@ -724,38 +1164,113 @@ export async function restoreBackup(uri: string, passphrase: string): Promise<Re
           alreadyPresent++;
           continue;
         }
+        const [name, description, systemPrompt] = await Promise.all([
+          encrypt(t.name), encOpt(t.description), encrypt(t.systemPrompt),
+        ]);
         await txn.runAsync(
           `INSERT OR REPLACE INTO custom_templates (id, name, description, systemPrompt, createdAt)
            VALUES (?, ?, ?, ?, ?)`,
-          [t.id, t.name, t.description, t.systemPrompt, t.createdAt]
+          [t.id, name, description, systemPrompt, t.createdAt]
         );
         await txn.runAsync(`DELETE FROM pending_deletions WHERE kind = 'template' AND key = ?`, [t.id]);
         restoredTemplates++;
       }
     };
 
-    const db = await getDb();
-    if (typeof db.withExclusiveTransactionAsync === 'function') {
-      await db.withExclusiveTransactionAsync(async (txn) => { await apply(txn); });
-    } else {
-      await db.withTransactionAsync(() => apply(db));
-    }
-
-    // Perfil profissional: só preenche se o aparelho ainda não tem perfil.
-    let doctorRestored = false;
-    const doctor = sanitizeDoctor(parsed.doctor);
-    if (doctor) {
-      const local = await getDoctorProfile();
-      const localEmpty = Object.values(local).every((v) => (typeof v === 'boolean' ? !v : v === ''));
-      if (localEmpty && Object.values(doctor).some((v) => (typeof v === 'boolean' ? v : v !== ''))) {
-        await setDoctorProfile(doctor);
-        doctorRestored = true;
+    await source(async (item) => {
+      if (item.element && item.key === 'recordings') {
+        const rec = sanitizeRecording(item.value);
+        if (!rec) unreadable++;
+        else if (recordings.push(rec) >= RESTORE_BATCH) await flushRecordings();
+      } else if (item.element && item.key === 'customTemplates') {
+        const tpl = sanitizeTemplate(item.value);
+        if (!tpl) unreadable++;
+        else if (templates.push(tpl) >= RESTORE_BATCH) await flushTemplates();
+      } else if (item.key === 'version') {
+        version = item.value;
+      } else if (item.key === 'app') {
+        app = item.value;
+      } else if (item.key === 'doctor') {
+        doctorRaw = item.value;
       }
-    }
+    });
+    await flushRecordings();
+    await flushTemplates();
+    // Só depois do documento inteiro (erro de sintaxe tem precedência); lança dentro da
+    // transação: nada do que os lotes gravaram sobrevive a um arquivo que não é um backup nosso.
+    if (version !== BACKUP_VERSION || app !== 'voice-ai-recorder') throw new Error(NOT_RECOGNIZED_MESSAGE);
+  };
 
-    if (restoredRecordings > 0 || restoredTemplates > 0) notifyDataChanged();
+  const db = await getDb();
+  if (typeof db.withExclusiveTransactionAsync === 'function') {
+    await db.withExclusiveTransactionAsync(async (txn) => { await apply(txn); });
+  } else {
+    await db.withTransactionAsync(() => apply(db));
+  }
+
+  // Perfil profissional: só preenche se o aparelho ainda não tem perfil.
+  let doctorRestored = false;
+  const doctor = sanitizeDoctor(doctorRaw);
+  if (doctor) {
+    const local = await getDoctorProfile();
+    const localEmpty = Object.values(local).every((v) => (typeof v === 'boolean' ? !v : v === ''));
+    if (localEmpty && Object.values(doctor).some((v) => (typeof v === 'boolean' ? v : v !== ''))) {
+      await setDoctorProfile(doctor);
+      doctorRestored = true;
+    }
+  }
+
+  if (restoredRecordings > 0 || restoredTemplates > 0) notifyDataChanged();
+  return { restoredRecordings, restoredTemplates, alreadyPresent, unreadable, doctorRestored };
+}
+
+/**
+ * Lê o arquivo em blocos (nunca o texto inteiro): o ciphertext é decifrado por pedaços de ~192 KB e o
+ * JSON é fatiado por registro. Como o GCM só autentica no fim, há DOIS passes de decifra: o 1º só
+ * confirma a tag (senha errada/adulteração viram BackupPassphraseError sem tocar no banco; AES nativo
+ * custa poucos ms por MB); o 2º alimenta o parser e a transação, que só faz commit depois de o
+ * 2º passe fechar a tag de novo.
+ */
+async function restoreFile(file: File, passphrase: string): Promise<RestoreResult> {
+  const sealed = openSealedFile(file);
+  if (!sealed) {
+    // Fora do layout do exportador (ex.: JSON reformatado): caminho em memória, aceita qualquer JSON válido.
+    const parsed = await decryptBackupText(await file.text(), passphrase);
+    if (!isRecord(parsed)) throw new Error(NOT_RECOGNIZED_MESSAGE);
+    return applyBackupItems(parsedSource(parsed));
+  }
+  try {
+    const n = loadNativeCrypto();
+    const { salt, nonce, aad } = envelopeParams(n, sealed.env);
+    const { tag, cipherBytes } = readSealedTail(n, sealed);
+    const key = await deriveKey(n, passphrase, salt, sealed.env.kdf.N);
+    try {
+      const open = () => new SealedReader(n, sealed, key, nonce, aad, tag, cipherBytes);
+      const verify = open();
+      for (let chunk = verify.next(); chunk !== null; chunk = verify.next()) chunk.fill(0);
+      return await applyBackupItems(streamedSource(n, open()));
+    } finally {
+      key.fill(0);
+    }
+  } finally {
+    sealed.handle.close();
+  }
+}
+
+/**
+ * Restaura o conteúdo de um arquivo de backup. Itens que já existem COM conteúdo no
+ * aparelho são mantidos (nada é sobrescrito); linha existente porém vazia não conta
+ * como "já existia". Tudo é aplicado numa transação exclusiva: ou entra tudo ou nada.
+ */
+export async function restoreBackup(uri: string, passphrase: string): Promise<RestoreResult> {
+  let succeeded = false;
+  try {
+    const file = new File(uri);
+    if (!file.exists) throw new Error('Arquivo não encontrado.');
+    if (file.size > MAX_BACKUP_BYTES) throw new Error(FILE_TOO_BIG_MESSAGE); // antes de ler/derivar
+    const result = await restoreFile(file, passphrase);
     succeeded = true;
-    return { restoredRecordings, restoredTemplates, alreadyPresent, unreadable, doctorRestored };
+    return result;
   } finally {
     // Só descarta a cópia temporária no sucesso: em falha (ex.: senha errada) o usuário
     // tenta de novo com o mesmo arquivo; o chamador descarta ao cancelar.
