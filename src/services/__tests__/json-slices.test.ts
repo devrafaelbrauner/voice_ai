@@ -1,6 +1,6 @@
 // Leitor incremental de JSON (restore em lotes): fronteiras, escapes cortados na borda de pedaço e
 // fuzz contra o JSON.parse (mesmo veredito, mesmo conteúdo) com pedaços de 1 caractere em diante.
-import { JsonNotObjectError, JsonSliceError, readJsonObject, type JsonItem } from '../json-slices';
+import { JsonNotObjectError, JsonSliceError, MAX_ARRAY_ITEMS, MAX_FIELD_CHARS, readJsonObject, type JsonItem } from '../json-slices';
 
 const KEYS: ReadonlySet<string> = new Set(['recordings', 'customTemplates']);
 
@@ -286,5 +286,50 @@ describe('readJsonObject: fuzz contra JSON.parse', () => {
     expect(invalid).toBeGreaterThan(500);
     expect(notObject).toBeGreaterThanOrEqual(0);
     expect(duplicates).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('readJsonObject: tetos (arquivo hostil)', () => {
+  const run = (text: string, limits?: Parameters<typeof readJsonObject>[4]) => {
+    const items: JsonItem[] = [];
+    return readJsonObject(pullFrom(text, 4096), KEYS, (i) => { items.push(i); }, 64 * 1024, limits).then(() => items);
+  };
+  const ones = (n: number) => `[${'1,'.repeat(n - 1)}1]`;
+
+  test('o teto padrão é 200 000 itens por array: 200 000 passam, 200 001 dão JsonSliceError(limit) antes de entregar o excedente', async () => {
+    expect(MAX_ARRAY_ITEMS).toBe(200_000);
+    expect(await run(`{"recordings":${ones(200_000)}}`)).toHaveLength(200_000);
+    const seen: number[] = [];
+    const err = await readJsonObject(pullFrom(`{"recordings":${ones(200_001)}}`, 4096), KEYS, () => { seen.push(1); }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(JsonSliceError);
+    expect(err).toMatchObject({ reason: 'limit' });
+    expect(seen).toHaveLength(200_000);
+  });
+
+  test('o teto vale POR chave (gravações e templates contam separado)', async () => {
+    expect(await run(`{"recordings":${ones(3)},"customTemplates":${ones(3)}}`, { maxElements: 3 })).toHaveLength(6);
+    await expect(run(`{"recordings":${ones(3)},"customTemplates":${ones(4)}}`, { maxElements: 3 })).rejects.toMatchObject({ reason: 'limit' });
+  });
+
+  test('valor de primeiro nível que não é array "streamed": acima de maxFieldChars é recusado SEM JSON.parse; no limite passa', async () => {
+    const parse = jest.spyOn(JSON, 'parse');
+    try {
+      const doc = (n: number) => `{"doctor":{"name":"${'d'.repeat(n)}"}}`;
+      const limit = 1000;
+      expect(await run(doc(limit - 20), { maxFieldChars: limit })).toHaveLength(1);
+      parse.mockClear();
+      await expect(run(doc(limit), { maxFieldChars: limit })).rejects.toMatchObject({ reason: 'limit' });
+      expect(parse.mock.calls.every(([s]) => String(s).length < limit)).toBe(true); // só a chave "doctor", nunca o valor
+      await expect(run(`{"x":${ones(1000)}}`, { maxFieldChars: 100 })).rejects.toMatchObject({ reason: 'limit' });
+      await expect(run(`"${'x'.repeat(200)}"`, { maxFieldChars: 100 })).rejects.toMatchObject({ reason: 'limit' }); // não-objeto grande
+    } finally {
+      parse.mockRestore();
+    }
+    expect(MAX_FIELD_CHARS).toBe(1024 * 1024);
+  });
+
+  test('elemento grande de array "streamed" NÃO tem o teto de campo (uma gravação pode ter transcrição de MBs)', async () => {
+    const items = await run(`{"recordings":[{"t":"${'x'.repeat(3000)}"}]}`, { maxFieldChars: 100 });
+    expect(items).toHaveLength(1);
   });
 });

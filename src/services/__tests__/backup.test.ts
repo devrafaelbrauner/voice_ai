@@ -27,12 +27,14 @@ import type * as DbCryptoModule from '../db-crypto';
 declare global {
   var __fakeFs: Map<string, string | { size: number }>;
 }
-// share.ts puxa componentes de UI; só createExportFile importa aqui (grava no FS em memória).
+// share.ts puxa componentes de UI; só createExportFile importa aqui (grava no FS em memória). Como o
+// real, cada chamada ganha um diretório próprio (token), então o nome do arquivo nunca colide pelo caminho.
+let mockExportSeq = 0;
 jest.mock('../share', () => ({
   __esModule: true,
   createExportFile: (name: string) => {
     const { File } = jest.requireMock('expo-file-system');
-    const file = new File(`file:///cache/exports/tok/${name}`);
+    const file = new File(`file:///cache/exports/tok${++mockExportSeq}/${name}`);
     file.create();
     return file;
   },
@@ -1009,13 +1011,20 @@ describe('exportar e restaurar ~28 MB em blocos: nunca existe uma cópia inteira
     expect(fakeFs().has(PICKED)).toBe(false);
   }, 120_000);
 
-  test('o mesmo arquivo restaurado pelo caminho em memória (JSON reformatado) dá o mesmo resultado, só que lendo o texto inteiro', async () => {
+  test('o mesmo arquivo (~37 MB) FORA do layout (JSON reformatado) é recusado: mensagem clara, sem file.text(), sem JSON.parse do arquivo e sem KDF', async () => {
     const B = newDevice();
     putFile(PICKED, JSON.stringify(JSON.parse(bigFile), null, 2)); // fora do layout do exportador
     const text = jest.spyOn(fileClass().prototype, 'text');
-    const res = await B.backup.restoreBackup(PICKED, PASS);
-    expect(text).toHaveBeenCalledTimes(1);
-    expect(res).toMatchObject({ restoredRecordings: COUNT, unreadable: 0 });
+    const parse = jest.spyOn(JSON, 'parse');
+    try {
+      await expect(B.backup.restoreBackup(PICKED, PASS)).rejects.toThrow('Formato de backup não suportado ou arquivo corrompido.');
+    } finally {
+      expect(parse.mock.calls.reduce((m, [s]) => Math.max(m, String(s).length), 0)).toBeLessThan(64 * 1024);
+      parse.mockRestore();
+    }
+    expect(text).not.toHaveBeenCalled();
+    expect(nativeMock().scrypt).not.toHaveBeenCalled();
+    expect(fakeFs().has(PICKED)).toBe(true);
   }, 120_000);
 });
 
@@ -1353,5 +1362,153 @@ describe('exportação: coerência entre os dois passes sobre o banco', () => {
     expect(nativeMock().scrypt).not.toHaveBeenCalled();
     expect(w.cipherUpdates).toEqual([]);
     expect([...fakeFs().keys()].filter((k) => k.includes('/exports/'))).toEqual([]);
+  });
+});
+
+// ─── Revisão G: teto do fallback, teto de itens, erro de tag persistente, nome de export único ───────
+
+describe('restauração: fallback em memória com teto (M1) e teto de itens (M2)', () => {
+  const PICKED = 'file:///cache/DocumentPicker/teto.enc.json';
+  const HEAD = '{"version":2,"app":"voice-ai-recorder","exportedAt":"2025-06-01T12:00:00.000Z","doctor":null,';
+  const ones = (n: number) => `[${'1,'.repeat(n - 1)}1]`;
+  const pretty = (envelopeJson: string) => JSON.stringify(JSON.parse(envelopeJson), null, 1); // fora do layout do exportador
+
+  async function restoreText(text: string) {
+    const B = newDevice();
+    putFile(PICKED, text);
+    const textSpy = jest.spyOn(fileClass().prototype, 'text');
+    const parse = jest.spyOn(JSON, 'parse');
+    const err = await B.backup.restoreBackup(PICKED, PASS).then(() => null, (e: unknown) => e as Error);
+    const biggestParse = parse.mock.calls.reduce((m, [s]) => Math.max(m, String(s).length), 0);
+    parse.mockRestore();
+    return { B, err, textCalls: textSpy.mock.calls.length, biggestParse };
+  }
+
+  test('fora do layout e acima de 8 MB (lixo ou envelope reformatado): erro claro, sem file.text(), sem JSON.parse do arquivo e sem KDF', async () => {
+    for (const text of ['x'.repeat(9 * MB), `{"a":"${'y'.repeat(9 * MB)}"}`, pretty(envelopeFromBytes(Buffer.from(`${HEAD}"recordings":[{"fileName":"a.m4a","transcript":"${'t'.repeat(7 * MB)}"}]}`)))]) {
+      expect(text.length).toBeGreaterThan(8 * MB);
+      const { B, err, textCalls, biggestParse } = await restoreText(text);
+      expect(err?.message).toBe('Formato de backup não suportado ou arquivo corrompido.');
+      expect(err).not.toBeInstanceOf(B.backup.BackupPassphraseError);
+      expect(textCalls).toBe(0);
+      expect(biggestParse).toBeLessThan(64 * 1024);
+      expect(nativeMock().scrypt).not.toHaveBeenCalled();
+      expect(fakeFs().has(PICKED)).toBe(true);
+    }
+  });
+
+  test('fora do layout e abaixo do teto (~6 MB reformatado) continua restaurando pelo caminho em memória', async () => {
+    const plain = `${HEAD}"recordings":[{"fileName":"a.m4a","transcript":"${'t'.repeat(5 * MB)}"}]}`;
+    const text = pretty(envelopeFromBytes(Buffer.from(plain)));
+    expect(text.length).toBeGreaterThan(6 * MB);
+    expect(text.length).toBeLessThan(8 * MB);
+    const { B, err, textCalls } = await restoreText(text);
+    expect(err).toBeNull();
+    expect(textCalls).toBe(1);
+    expect((await B.db.getField('a.m4a', 'transcript'))?.length).toBe(5 * MB);
+  }, 60_000);
+
+  test('200 000 itens por array passam; 200 001 viram "conteúdo corrompido" e nada é gravado (gravações e templates)', async () => {
+    const okRec = await restoreText(envelopeFromBytes(Buffer.from(`${HEAD}"recordings":${ones(200_000)}}`)));
+    expect(okRec.err).toBeNull();
+
+    for (const [key, n] of [['recordings', 200_001], ['customTemplates', 200_001]] as const) {
+      const rec = key === 'recordings' ? `{"fileName":"ok.m4a","transcript":"t"},` : `{"id":"t1","name":"n","systemPrompt":"p"},`;
+      const { B, err } = await restoreText(envelopeFromBytes(Buffer.from(`${HEAD}"${key}":[${rec}${ones(n - 1).slice(1)}}`)));
+      expect([key, err?.message]).toEqual([key, 'Conteúdo do backup corrompido.']);
+      expect(await B.db.getBackupCounts()).toEqual({ recordings: 0, transcribed: 0, finalized: 0, templates: 0 });
+    }
+  }, 60_000);
+
+  test('o mesmo teto vale no caminho em memória (arquivo pequeno reformatado com 200 001 itens)', async () => {
+    const { B, err, textCalls } = await restoreText(pretty(envelopeFromBytes(Buffer.from(`${HEAD}"recordings":${ones(200_001)}}`))));
+    expect(textCalls).toBe(1);
+    expect(err?.message).toBe('Conteúdo do backup corrompido.');
+    expect((await B.db.getBackupCounts()).recordings).toBe(0);
+  }, 60_000);
+
+  test('campo de primeiro nível gigante (doctor ou chave desconhecida com > 1 MiB) é recusado sem parse', async () => {
+    for (const extra of [`"doctor":{"name":"${'d'.repeat(MB)}"},"recordings":[]`, `"x":[${'1,'.repeat(MB)}1],"recordings":[]`]) {
+      const { err, biggestParse } = await restoreText(envelopeFromBytes(Buffer.from(`{"version":2,"app":"voice-ai-recorder",${extra}}`)));
+      expect(err?.message).toBe('Conteúdo do backup corrompido.');
+      expect(biggestParse).toBeLessThan(64 * 1024);
+    }
+  });
+});
+
+describe('SealedReader: erro de tag é permanente (L2)', () => {
+  const URI = 'file:///cache/DocumentPicker/reader.enc.json';
+
+  function readerWith(key: Buffer) {
+    const d = newDevice();
+    putFile(URI, envelopeFromBytes(Buffer.from(JSON.stringify(samplePayload()))));
+    const { File } = jest.requireMock('expo-file-system');
+    const n = jest.requireActual<typeof import('../native-crypto')>('../native-crypto').loadNativeCrypto();
+    const { openSealedFile, readSealedTail, SealedReader } = d.backup.backupInternals;
+    const sealed = openSealedFile(new File(URI))!;
+    const { env } = sealed;
+    const aad = new TextEncoder().encode(
+      JSON.stringify(['voiceai-backup', 2, env.exportedAt, env.stats, 'scrypt', env.kdf.N, env.kdf.r, env.kdf.p, env.kdf.salt_b64, env.cipher.nonce_b64])
+    );
+    const { tag, cipherBytes } = readSealedTail(n, sealed);
+    const nonce = Buffer.from(env.cipher.nonce_b64, 'base64');
+    return { reader: new SealedReader(n, sealed, key, nonce, aad, tag, cipherBytes), BackupPassphraseError: d.backup.BackupPassphraseError };
+  }
+  const drain = (r: { next(): Uint8Array | null }) => { while (r.next() !== null); };
+  const rightKey = () => nodeCrypto.scryptSync(PASS.normalize('NFKC'), Buffer.alloc(16, 5), 32, { N: 2 ** 14, r: 8, p: 1 });
+
+  test('controle: com a chave certa o fim do arquivo devolve null (e continua devolvendo null)', () => {
+    const { reader } = readerWith(rightKey());
+    drain(reader);
+    expect(reader.next()).toBeNull();
+  });
+
+  test('tag que não confere: BackupPassphraseError no fim e em TODAS as chamadas seguintes (nunca null)', () => {
+    const { reader, BackupPassphraseError: Err } = readerWith(Buffer.alloc(32, 1));
+    expect(() => drain(reader)).toThrow(Err);
+    for (let i = 0; i < 3; i++) expect(() => reader.next()).toThrow(Err);
+  });
+});
+
+describe('arquivo de exportação: nome único e nunca apagar o de outra exportação (L4)', () => {
+  const FROZEN = new Date('2025-06-01T12:00:00.123Z');
+  const REAL_TIMERS_OFF = ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame',
+    'requestIdleCallback', 'cancelIdleCallback', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] as const;
+  beforeEach(() => { jest.useFakeTimers({ now: FROZEN, doNotFake: [...REAL_TIMERS_OFF] }); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  const basename = (uri: string) => uri.split('/').pop()!;
+
+  test('duas exportações no MESMO instante geram nomes diferentes (milissegundos + sufixo) e ambas continuam abrindo', async () => {
+    const A = newDevice();
+    await seed(A);
+    const first = await A.backup.exportBackup(PASS);
+    const second = await A.backup.exportBackup(PASS);
+    expect(basename(first.path!)).not.toBe(basename(second.path!));
+    expect(basename(first.path!)).toMatch(/^voice-ai-recorder-backup-2025-06-01T12-00-00-123-[a-z0-9]{4}\.enc\.json$/);
+    expect(first.path).not.toBe(second.path);
+    for (const out of [first, second]) {
+      expect(((await decryptBackupText(fakeFs().get(out.path!) as string, PASS)) as BackupPayload).recordings).toHaveLength(1);
+    }
+  });
+
+  test('2ª exportação que falha no meio apaga só o próprio arquivo parcial; a 1ª (mesmo instante) fica intacta', async () => {
+    const A = newDevice();
+    await seed(A);
+    const first = await A.backup.exportBackup(PASS);
+    const firstContent = fakeFs().get(first.path!);
+    const del = jest.spyOn(fileClass().prototype as unknown as { delete: () => void }, 'delete');
+
+    const raw = await rawSqlite(A);
+    nativeMock().scrypt.mockImplementationOnce((...args: unknown[]) => {
+      raw.exec("UPDATE recordings SET customName = customName || 'x'"); // muda o tamanho entre os passes
+      return (nodeCrypto.scrypt as (...a: unknown[]) => void)(...args);
+    });
+    await expect(A.backup.exportBackup(PASS)).rejects.toThrow(/mudaram durante a exportação/);
+
+    expect(fakeFs().get(first.path!)).toBe(firstContent);
+    expect([...fakeFs().keys()].filter((k) => k.includes('/exports/'))).toEqual([first.path]);
+    const deleted = del.mock.calls.length;
+    expect(deleted).toBeLessThanOrEqual(1); // só o parcial da própria chamada (se o KDF terminou antes de criar o arquivo, nenhum)
   });
 });

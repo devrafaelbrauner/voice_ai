@@ -12,7 +12,7 @@
 // "streamed" é recusada (o JSON.parse ficaria com a última; aqui o primeiro já teria sido entregue).
 
 export class JsonSliceError extends Error {
-  constructor(message: string, readonly reason: 'syntax' | 'duplicate' = 'syntax') {
+  constructor(message: string, readonly reason: 'syntax' | 'duplicate' | 'limit' = 'syntax') {
     super(message);
     this.name = 'JsonSliceError';
     Object.setPrototypeOf(this, JsonSliceError.prototype);
@@ -47,7 +47,18 @@ const RBRACE = 125;
 /** Quantos caracteres, no mínimo, cada recarga do buffer traz (e nunca menos que o pendente: custo amortizado linear). */
 export const DEFAULT_MIN_READ_CHARS = 64 * 1024;
 
+/** Teto de itens por array "streamed" (um backup legítimo tem milhares de gravações). */
+export const MAX_ARRAY_ITEMS = 200_000;
+/** Teto, em caracteres, de um valor de primeiro nível que não é elemento de array "streamed". */
+export const MAX_FIELD_CHARS = 1024 * 1024;
+
+export interface JsonLimits {
+  maxElements: number;
+  maxFieldChars: number;
+}
+
 const syntax = (what: string) => new JsonSliceError(`JSON inválido (${what}).`);
+const limit = (what: string) => new JsonSliceError(`JSON acima do limite (${what}).`, 'limit');
 
 /** Fim (exclusivo) da string que abre em `buf[i]`, ou -1 se ainda não fechou. */
 function skipString(buf: string, i: number): number {
@@ -175,14 +186,19 @@ class Cursor {
  * (`element: true`); qualquer outro valor de primeiro nível vira um `onItem` com `element: false`
  * (chave repetida: um item por ocorrência, o consumidor fica com o último). Aguarda o retorno de
  * `onItem` quando for uma Promise (contrapressão: o consumidor grava o lote antes do próximo).
- * Lança JsonSliceError (JSON malformado/truncado) ou JsonNotObjectError (JSON válido que não é objeto).
+ * Lança JsonSliceError (JSON malformado/truncado, ou acima dos tetos de `limits`) ou JsonNotObjectError
+ * (JSON válido que não é objeto). Tetos: itens por array "streamed" e tamanho de valor de primeiro nível
+ * que não é array "streamed" (doctor, version…): ficam acima de qualquer backup legítimo e impedem que
+ * um arquivo hostil (milhões de `1,`; um campo de dezenas de MB) prenda a thread JS e a transação.
  */
 export async function readJsonObject(
   pull: () => string | null,
   streamedKeys: ReadonlySet<string>,
   onItem: (item: JsonItem) => void | Promise<void>,
-  minReadChars: number = DEFAULT_MIN_READ_CHARS
+  minReadChars: number = DEFAULT_MIN_READ_CHARS,
+  limitOverrides: Partial<JsonLimits> = {}
 ): Promise<void> {
+  const limits: JsonLimits = { maxElements: MAX_ARRAY_ITEMS, maxFieldChars: MAX_FIELD_CHARS, ...limitOverrides };
   const cur = new Cursor(pull, minReadChars);
   const emit = async (item: JsonItem) => {
     const r = onItem(item);
@@ -192,7 +208,9 @@ export async function readJsonObject(
   let c = cur.peek();
   if (c === -1) throw syntax('vazio');
   if (c !== LBRACE) {
-    parseSlice(cur.takeValue());
+    const text = cur.takeValue();
+    if (text.length > limits.maxFieldChars) throw limit('valor grande demais');
+    parseSlice(text);
     if (cur.peek() !== -1) throw syntax('texto depois do valor');
     throw new JsonNotObjectError();
   }
@@ -221,7 +239,8 @@ export async function readJsonObject(
         if (c === RBRACKET) {
           cur.pos++;
         } else {
-          for (;;) {
+          for (let count = 0; ; ) {
+            if (++count > limits.maxElements) throw limit(`mais de ${limits.maxElements} itens em "${key}"`);
             await emit({ key, value: parseSlice(cur.takeValue()), element: true });
             c = cur.peek();
             if (c === COMMA) {
@@ -237,7 +256,9 @@ export async function readJsonObject(
           }
         }
       } else {
-        await emit({ key, value: parseSlice(cur.takeValue()), element: false });
+        const text = cur.takeValue();
+        if (text.length > limits.maxFieldChars) throw limit('valor de primeiro nível grande demais');
+        await emit({ key, value: parseSlice(text), element: false });
       }
 
       c = cur.peek();

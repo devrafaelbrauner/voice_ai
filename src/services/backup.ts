@@ -44,7 +44,7 @@ import {
   type GcmDecryptStream,
   type NativeCrypto,
 } from './native-crypto';
-import { readJsonObject, JsonSliceError, JsonNotObjectError, type JsonItem } from './json-slices';
+import { readJsonObject, JsonSliceError, JsonNotObjectError, MAX_ARRAY_ITEMS, type JsonItem } from './json-slices';
 import type { SQLiteDatabase } from 'expo-sqlite';
 import {
   getDb,
@@ -65,6 +65,9 @@ const BACKUP_VERSION = 2;
 const FORMAT_ID = 'encrypted-backup-v2';
 const LEGACY_FORMAT_ID = 'encrypted-backup-v1';
 const MAX_BACKUP_BYTES = 50 * 1024 * 1024;
+/** Arquivo fora do layout do exportador só é lido por inteiro (file.text + JSON.parse) até este tamanho. */
+const FALLBACK_MAX_BYTES = 8 * 1024 * 1024;
+const UNSUPPORTED_FORMAT_MESSAGE = 'Formato de backup não suportado ou arquivo corrompido.';
 
 // Blocos do fluxo. Plaintext em múltiplos de 3 bytes: o base64 de cada bloco se concatena sem preenchimento.
 const PLAIN_CHUNK_BYTES = 3 * 65536; // 192 KiB
@@ -610,6 +613,7 @@ class SealedReader {
   private charsLeft: number;
   private bytesLeft: number;
   private finished = false;
+  private failed = false;
 
   constructor(
     private readonly n: NativeCrypto,
@@ -632,15 +636,17 @@ class SealedReader {
    * não é autêntico — ver GcmDecryptStream.
    */
   next(): Uint8Array | null {
+    if (this.failed) throw new BackupPassphraseError(); // erro de tag é permanente: nunca "terminou bem" depois
     for (;;) {
       if (this.charsLeft === 0) {
         if (!this.finished) {
-          this.finished = true;
           try {
             this.decipher.finish();
           } catch {
+            this.failed = true;
             throw new BackupPassphraseError();
           }
+          this.finished = true;
         }
         return null;
       }
@@ -834,11 +840,14 @@ export async function exportBackup(passphrase: string): Promise<ExportOutcome> {
     return { status: 'empty', ...outcome };
   }
 
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  // Segundos + milissegundos + sufixo aleatório: duas exportações no mesmo instante não compartilham nome
+  // (createExportFile também isola cada uma num diretório próprio). Só apagamos o que ESTA chamada criou.
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23);
+  const fileName = `voice-ai-recorder-backup-${stamp}-${Math.random().toString(36).slice(2, 6).padEnd(4, '0')}.enc.json`;
   const created: File[] = [];
   try {
     await sealBackup(plan.source, passphrase, (n) => {
-      const target = createExportFile(`voice-ai-recorder-backup-${stamp}.enc.json`);
+      const target = createExportFile(fileName);
       created.push(target);
       const handle = target.open();
       return {
@@ -1177,12 +1186,17 @@ async function applyBackupItems(source: RestoreSource): Promise<RestoreResult> {
       }
     };
 
+    let recordingItems = 0;
+    let templateItems = 0;
     await source(async (item) => {
+      // Teto de itens por array (arquivo hostil: 40 MB de `1,` = 20 M de itens, JS parada, transação aberta).
       if (item.element && item.key === 'recordings') {
+        if (++recordingItems > MAX_ARRAY_ITEMS) throw new Error(CORRUPT_CONTENT_MESSAGE);
         const rec = sanitizeRecording(item.value);
         if (!rec) unreadable++;
         else if (recordings.push(rec) >= RESTORE_BATCH) await flushRecordings();
       } else if (item.element && item.key === 'customTemplates') {
+        if (++templateItems > MAX_ARRAY_ITEMS) throw new Error(CORRUPT_CONTENT_MESSAGE);
         const tpl = sanitizeTemplate(item.value);
         if (!tpl) unreadable++;
         else if (templates.push(tpl) >= RESTORE_BATCH) await flushTemplates();
@@ -1234,7 +1248,10 @@ async function applyBackupItems(source: RestoreSource): Promise<RestoreResult> {
 async function restoreFile(file: File, passphrase: string): Promise<RestoreResult> {
   const sealed = openSealedFile(file);
   if (!sealed) {
-    // Fora do layout do exportador (ex.: JSON reformatado): caminho em memória, aceita qualquer JSON válido.
+    // Fora do layout do exportador (ex.: JSON reformatado): caminho em memória (texto + JSON.parse
+    // do envelope ANTES de qualquer senha/tag, e o pico antigo de memória). Só para arquivos pequenos;
+    // um arquivo grande e fora do layout nunca é lido: erro claro, sem file.text() nem JSON.parse.
+    if (file.size > FALLBACK_MAX_BYTES) throw new Error(UNSUPPORTED_FORMAT_MESSAGE);
     const parsed = await decryptBackupText(await file.text(), passphrase);
     if (!isRecord(parsed)) throw new Error(NOT_RECOGNIZED_MESSAGE);
     return applyBackupItems(parsedSource(parsed));
@@ -1277,3 +1294,6 @@ export async function restoreBackup(uri: string, passphrase: string): Promise<Re
     if (succeeded) discardPickedFile(uri);
   }
 }
+
+/** Peças internas do restore em blocos, expostas só para os testes (o leitor de ciphertext não tem outro ponto de entrada). */
+export const backupInternals = { openSealedFile, readSealedTail, SealedReader };
