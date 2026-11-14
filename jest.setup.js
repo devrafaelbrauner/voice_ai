@@ -91,6 +91,34 @@ jest.mock('expo-crypto', () => ({
   randomUUID: () => require('node:crypto').randomUUID(),
 }));
 
+// react-native-quick-crypto (scrypt + AES-256-GCM nativos) -> node:crypto REAL, mesma API e
+// mesmos parâmetros (scrypt assíncrono em callback, createCipheriv/Decipheriv, setAAD/setAuthTag).
+// jest.fn para os testes inspecionarem chamadas (ex.: "o KDF não rodou").
+jest.mock('react-native-quick-crypto', () => {
+  const nodeCrypto = require('node:crypto');
+  return {
+    __esModule: true,
+    scrypt: jest.fn((...args) => nodeCrypto.scrypt(...args)),
+    createCipheriv: jest.fn((...args) => nodeCrypto.createCipheriv(...args)),
+    createDecipheriv: jest.fn((...args) => nodeCrypto.createDecipheriv(...args)),
+    Buffer,
+  };
+});
+
+// react-native-quick-base64 (TurboModule nativo; decodificador estrito, como o simdutf).
+jest.mock('react-native-quick-base64', () => {
+  const strict = /^[A-Za-z0-9+/]*={0,2}$/;
+  return {
+    __esModule: true,
+    toByteArray: (b64) => {
+      if (b64.length % 4 !== 0 || !strict.test(b64)) throw new Error('Input is not valid base64-encoded data');
+      const b = Buffer.from(b64, 'base64');
+      return new Uint8Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
+    },
+    fromByteArray: (u8) => Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength).toString('base64'),
+  };
+});
+
 jest.mock('expo-document-picker', () => ({ __esModule: true, getDocumentAsync: jest.fn() }));
 jest.mock('expo-sharing', () => ({
   __esModule: true,

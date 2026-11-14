@@ -2,7 +2,10 @@
  * db-crypto.ts — Criptografia AES-256-GCM para campos sensíveis do SQLite
  *
  * Estratégia:
- *   - AES-256-GCM em JS puro via @noble/ciphers (auditado, sem módulo nativo).
+ *   - AES-256-GCM NATIVO (OpenSSL via react-native-quick-crypto, chamada síncrona por JSI,
+ *     sem ponte assíncrona por campo) e base64 nativo: em JS puro (@noble) o Hermes fazia
+ *     ~0,7 MB/s e parava a thread JS ao ler/gravar dezenas de MB. Sem fallback para JS: sem o
+ *     módulo no binário, encrypt/decrypt lançam erro claro (ver native-crypto.ts).
  *     Hermes/React Native não expõe crypto.subtle, então WebCrypto não é usado.
  *   - Aleatoriedade (chave de 32 bytes, IV de 12 bytes) vem de expo-crypto
  *     (CSPRNG do sistema operacional) — nunca Math.random.
@@ -23,7 +26,7 @@
 
 import * as SecureStore from 'expo-secure-store';
 import { getRandomValues } from 'expo-crypto';
-import { gcm } from '@noble/ciphers/aes.js';
+import { loadNativeCrypto, gcmEncrypt, gcmDecrypt } from './native-crypto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { logWarn } from './log';
 
@@ -35,8 +38,7 @@ const KEY_BYTES = 32;
 const IV_BYTES = 12;
 const KEY_MARKER_KEY = 'db_aes_key_created_v1';
 
-// ─── Helpers base64 ──────────────────────────────────────────────────────────
-
+// ─── Helpers base64 (só a chave de 32 bytes; o conteúdo usa o base64 nativo) ──
 function uint8ToBase64(arr: Uint8Array): string {
   let binary = '';
   for (let i = 0; i < arr.length; i++) {
@@ -131,10 +133,11 @@ function getKey(): Promise<Uint8Array> {
  * Lança erro (fail closed) se chave, RNG ou cifra falharem — nunca retorna texto puro.
  */
 export async function encrypt(plaintext: string): Promise<string> {
+  const n = loadNativeCrypto();
   const key = await getKey();
   const iv = getRandomValues(new Uint8Array(IV_BYTES));
-  const ciphertext = gcm(key, iv).encrypt(new TextEncoder().encode(plaintext));
-  return `${ENC_PREFIX}${uint8ToBase64(iv)}:${uint8ToBase64(ciphertext)}`;
+  const sealed = gcmEncrypt(n, key, iv, new TextEncoder().encode(plaintext));
+  return `${ENC_PREFIX}${n.fromByteArray(iv)}:${n.fromByteArray(sealed)}`;
 }
 
 /**
@@ -151,7 +154,10 @@ export async function decrypt(stored: string): Promise<string> {
     return stored;
   }
 
-  // Corpo inteiro protegido — NENHUM caminho pode lançar (atob, decode, etc.).
+  // Módulo nativo ausente é erro de binário, não "dado corrompido": propaga (nunca vira sentinel).
+  const n = loadNativeCrypto();
+
+  // Corpo inteiro protegido — falhas de dado/chave nunca lançam (base64, tag GCM, decode).
   // Uma exceção aqui propagaria pela leitura do DB e poderia crashar a tela.
   try {
     const rest = stored.slice(ENC_PREFIX.length);
@@ -161,12 +167,11 @@ export async function decrypt(stored: string): Promise<string> {
       return stored;
     }
 
-    const iv = base64ToUint8(rest.slice(0, colonIdx));
-    const ct = base64ToUint8(rest.slice(colonIdx + 1));
+    const iv = n.toByteArray(rest.slice(0, colonIdx));
+    const sealed = n.toByteArray(rest.slice(colonIdx + 1));
 
     const key = await getKey();
-    const decrypted = gcm(key, iv).decrypt(ct);
-    return new TextDecoder().decode(decrypted);
+    return new TextDecoder().decode(gcmDecrypt(n, key, iv, sealed));
   } catch {
     // Seg #1: falha de decriptação — chave errada (dado cifrado em outro dispositivo),
     // dado corrompido ou chave local indisponível/inválida.

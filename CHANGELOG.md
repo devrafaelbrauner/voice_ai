@@ -2,6 +2,13 @@
 
 ## [Não lançado]
 
+### Corrigido — backup (QA em aparelho)
+- **KDF e cifra nativos (B1/B4):** scrypt (N=2^14 / 2^16, r=8, p=1) e AES-256-GCM do backup agora rodam em código nativo (`react-native-quick-crypto`, OpenSSL; scrypt no thread pool do C++) e o base64 em `react-native-quick-base64`, em vez de JS puro no Hermes (antes ~49 s por senha, thread JS parada de 27 s a 106 s e ~1,5 GB de RSS com 36 MB). Chamada assíncrona (nunca `*Sync`), sem fallback para JS: sem o módulo no binário o backup falha com mensagem clara. O formato v2 do envelope não mudou (mesmo scrypt, AES-GCM e AAD): backups antigos abrem e os novos abrem no código antigo (teste com envelope gerado pelo código @noble).
+- **Limite de 50 MB antes do KDF (B2):** o tamanho exato do envelope é calculado e comparado com o limite antes do scrypt e da cifra (export falhava só após 83 s); no restore, o tamanho do arquivo é checado antes de ler/derivar. Testes provam que o scrypt não é chamado quando o limite estoura.
+- **Criptografia local (db-crypto) também nativa (B1 de ponta a ponta):** `encrypt()`/`decrypt()` dos campos do SQLite usam AES-256-GCM nativo por JSI síncrono (sem ponte assíncrona por campo) e base64 nativo; antes o `@noble/ciphers` em JS decifrava ~0,7 MB/s (export: 18 s de "build" com 12,5 MB, 68 s com 36 MB; restore recifrava em JS). Formato `enc1:<iv>:<ct||tag>`, chave do SecureStore e `KeyLostError` inalterados: dados existentes continuam abrindo (teste com valores cifrados pelo código @noble antigo). Módulo ausente lança erro claro em vez de virar `__DECRYPT_FAILED__`. Loader/cifra compartilhados em `src/services/native-crypto.ts`.
+- **Segurança:** senha em bytes zerada após o KDF; `@noble/hashes` e `@noble/ciphers` viraram dependências de desenvolvimento (só os testes usam, como implementação de referência).
+- **Requer novo binário nativo** (`react-native-quick-crypto`, `react-native-nitro-modules`, `react-native-quick-base64`; plugin em `app.json`); não há OTA nem Expo Go.
+
 ### Segurança (mobile)
 - Criptografia local agora é AES-256-GCM real (`@noble/ciphers` + `expo-crypto`): o runtime Hermes não tem `crypto.subtle`, então antes os dados sensíveis eram gravados em texto puro. `encrypt()` falha fechado; chave criada com single-flight; `KeyLostError` em vez de regenerar chave silenciosamente. Verificado em aparelho (campo sensível gravado como `enc1:`, 0 ocorrências de texto puro no SQLite).
 - Migration v9 recifra linhas legadas em texto puro; `secure_delete` + VACUUM após migração; push de sync cifra campos sensíveis e aborta se falhar.

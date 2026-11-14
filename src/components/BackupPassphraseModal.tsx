@@ -242,7 +242,12 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
                     accessibilityRole="button"
                     accessibilityLabel="Cancelar"
                     accessibilityState={{ disabled: busy }}
-                    style={{ paddingVertical: 12, paddingHorizontal: 16, opacity: busy ? 0.4 : 1 }}
+                    style={{
+                      minHeight: 48,
+                      justifyContent: 'center',
+                      paddingHorizontal: 16,
+                      opacity: busy ? 0.4 : 1,
+                    }}
                   >
                     <Text style={{ fontSize: 14, fontWeight: '600', color: c.textSecondary }}>Cancelar</Text>
                   </Pressable>
@@ -255,7 +260,8 @@ export function BackupPassphraseModal({ visible, mode, fileName, onSubmit, onClo
                     style={{
                       backgroundColor: canSubmit ? c.accentBlue : c.bgSubtle,
                       borderRadius: 8,
-                      paddingVertical: 12,
+                      minHeight: 48,
+                      justifyContent: 'center',
                       paddingHorizontal: 18,
                     }}
                   >

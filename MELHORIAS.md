@@ -14,11 +14,11 @@
 - Observação de processo: `snapshot.py capture` da slice-b falhou em silêncio; raio comprovado só por `git diff` vs main.
 
 ## Run slice-c (dados e transcrição)
-- NÃO testado em aparelho/Hermes: tempo real de scrypt/AES-GCM em JS (backup de 12–50 MB pode travar a thread JS por dezenas de segundos; teto de memória no restore), `\p{L}` no Hermes, exclusive transaction do expo-sqlite, TalkBack, Supabase real — dono: QA mobile. Solução definitiva do KDF: módulo nativo.
+- NÃO testado em aparelho/Hermes: tempo real do backup e do db-crypto com AES-GCM/scrypt nativos (`react-native-quick-crypto`; esperado scrypt < ~2 s e `buildBackup` de 12,5 MB ≲ 2 s; custo de criar um Cipheriv por campo a confirmar; dev build ainda não gerada), teto de memória no restore de ~36 MB, `\p{L}` no Hermes, exclusive transaction do expo-sqlite, TalkBack, Supabase real — dono: QA mobile.
 - Edge function `openai-transcribe` esconde o `code` do 429 (quota via proxy aparece como rate_limit); `transcribeViaProxy` em `openai-proxy.ts` ficou sem uso — dono: backend.
 - L-R3: erro de `flushDeletions` isolado por chunk não aparece no status de sync — dono: Mobile.
 - Renomear/`durationSecs` ainda usam `setField` (protegido só por tombstone); `saveSummary/saveTranscript/saveSummaryTemplate` em openai.ts usam `setField` e não têm chamador — dono: Mobile.
-- SC-08, C3-02 (push/pull sem paginação), C3-03, AS-C-18..23 (colisão de nomes legados, estimativa de tamanho, restore não exclusivo, `clearField`, blocklist leet), UI-07/09, TP-05/09, erros de chave perdida (SBA-12) — dono: Mobile; slice D/E.
+- SC-08, C3-02 (push/pull sem paginação), C3-03, AS-C-18..23 (colisão de nomes legados, restore não exclusivo, `clearField`, blocklist leet), UI-07/09, TP-05/09, erros de chave perdida (SBA-12) — dono: Mobile; slice D/E.
 - Troca de conta descarta tombstones (exclusões da conta A voltam ao reentrar) — dono: Mobile.
 - Privacidade: fallback de cadeia só no mesmo provedor; opt-in cross-provider é decisão de Produto (slice S). Nenhuma tela de erro dedicada ainda lê `transcriptionErrors` fora do banner de Gravações.
 - Pendentes de Produto/DevOps (não bloqueiam merge): aplicar migrations Supabase, nova dev build, `CHECK enc1:%`, orçamento de gasto por conta.

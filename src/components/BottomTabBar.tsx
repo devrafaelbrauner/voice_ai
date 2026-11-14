@@ -61,6 +61,7 @@ const styles = StyleSheet.create({
   },
   tab: {
     flex: 1,
+    alignSelf: 'stretch', // alvo de toque = altura total da barra (52 dp), sem mudar o visual
     alignItems: 'center',
     justifyContent: 'center',
     gap: 3,

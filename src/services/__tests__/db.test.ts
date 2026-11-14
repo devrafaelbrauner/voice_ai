@@ -1,6 +1,9 @@
 // SQL real (node:sqlite via adaptador do jest.setup.js) + cifra real (db-crypto com chave em
 // memória). Cada teste recarrega os módulos: banco :memory: novo, chave nova, sem estado.
+import fs from 'node:fs';
+import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { gcm } from '@noble/ciphers/aes.js';
 import type * as DbModule from '../db';
 import type * as CryptoModule from '../db-crypto';
 
@@ -320,5 +323,69 @@ describe('resumo por contagem SQL', () => {
     await db.setField('r2.m4a', 'transcript', 'b');
     await db.deleteRecordingMeta('r1.m4a');
     expect((await db.getBackupCounts()).recordings).toBe(1);
+  });
+});
+
+describe('db-crypto com AES-GCM nativo (formato enc1:iv:ct inalterado)', () => {
+  // Gerado pelo db-crypto ANTERIOR (@noble/ciphers em JS): chave fixa + valores cifrados.
+  const FIXTURE: { keyB64: string; cases: { plain: string; stored: string }[] } = JSON.parse(
+    fs.readFileSync(path.join(__dirname, 'fixtures', 'db-crypto-noble.json'), 'utf8')
+  );
+  const secureStore = () => jest.requireMock('expo-secure-store').__store as Map<string, string>;
+  const nativeMock = () =>
+    jest.requireMock('react-native-quick-crypto') as { createCipheriv: jest.Mock; createDecipheriv: jest.Mock };
+
+  test('valores cifrados pelo código antigo (@noble) continuam abrindo com a mesma chave', async () => {
+    secureStore().set('db_aes_key_v1', FIXTURE.keyB64);
+    expect(FIXTURE.cases.length).toBeGreaterThanOrEqual(4);
+    for (const { plain, stored } of FIXTURE.cases) {
+      expect(stored.startsWith('enc1:')).toBe(true);
+      expect(await crypto.decrypt(stored)).toBe(plain);
+    }
+  });
+
+  test('valores cifrados pelo código nativo abrem na referência @noble (mesmo layout iv + ciphertext||tag)', async () => {
+    secureStore().set('db_aes_key_v1', FIXTURE.keyB64);
+    const key = Buffer.from(FIXTURE.keyB64, 'base64');
+    for (const plain of ['', 'evolução 😀 do paciente', 'y'.repeat(3000)]) {
+      const stored = await crypto.encrypt(plain);
+      const [, ivB64, ctB64] = stored.split(':');
+      const out = gcm(key, Buffer.from(ivB64, 'base64')).decrypt(Buffer.from(ctB64, 'base64'));
+      expect(new TextDecoder().decode(out)).toBe(plain);
+    }
+  });
+
+  test('chave errada ou dado adulterado continua dando o sentinel (nunca lança)', async () => {
+    secureStore().set('db_aes_key_v1', Buffer.alloc(32, 1).toString('base64'));
+    const { stored } = FIXTURE.cases[2];
+    expect(await crypto.decrypt(stored)).toBe(crypto.DECRYPT_FAILED_SENTINEL);
+    secureStore().set('db_aes_key_v1', FIXTURE.keyB64);
+    jest.resetModules();
+    const c2 = jest.requireActual<typeof CryptoModule>('../db-crypto');
+    expect(await c2.decrypt(`${stored.slice(0, -6)}AAAA==`)).toBe(c2.DECRYPT_FAILED_SENTINEL);
+    expect(await c2.decrypt('enc1:semdoispontos')).toBe('enc1:semdoispontos');
+    expect(await c2.decrypt('enc1:AAAA:AAAA')).toBe(c2.DECRYPT_FAILED_SENTINEL);
+  });
+
+  test('módulo nativo ausente: encrypt/decrypt de valor cifrado falham com erro claro (não viram sentinel); texto puro segue legível', async () => {
+    secureStore().set('db_aes_key_v1', FIXTURE.keyB64);
+    const missing = () => { throw new Error('Nitro: HybridObject CipherFactory not found'); };
+    nativeMock().createCipheriv.mockImplementationOnce(missing);
+    await expect(crypto.encrypt('x')).rejects.toThrow(/criptografia nativa/i);
+    nativeMock().createCipheriv.mockImplementationOnce(missing);
+    await expect(crypto.decrypt(FIXTURE.cases[1].stored)).rejects.toThrow(/criptografia nativa/i);
+    // Legado em texto puro não precisa do módulo nativo.
+    nativeMock().createCipheriv.mockImplementationOnce(missing);
+    expect(await crypto.decrypt('texto legado')).toBe('texto legado');
+  });
+
+  test('lote de ~2800 campos (700 linhas x 4) cifra e decifra via JSI síncrono sem estourar o tempo', async () => {
+    secureStore().set('db_aes_key_v1', FIXTURE.keyB64);
+    const field = 'Paciente relata cefaleia há três dias, sem febre. '.repeat(8); // ~400 B
+    const t0 = Date.now();
+    const stored = await Promise.all(Array.from({ length: 2800 }, () => crypto.encrypt(field)));
+    const plain = await Promise.all(stored.map((s) => crypto.decrypt(s)));
+    expect(plain.every((p) => p === field)).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(5000);
   });
 });

@@ -157,6 +157,12 @@ const swipeStyles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
   },
+  iconTouch: {
+    minWidth: 48,
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   pickerBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -953,6 +959,7 @@ export default function RecordingsScreen() {
               {!isProcessingQueue && (
                 <Pressable
                   onPress={() => processOfflineQueue(true)}
+                  hitSlop={{ top: 9, bottom: 9, left: 6, right: 6 }}
                   accessibilityRole="button"
                   accessibilityLabel="Tentar processar fila offline agora"
                 >
@@ -996,6 +1003,7 @@ export default function RecordingsScreen() {
               </YStack>
               <Pressable
                 onPress={handleClearFailedItems}
+                hitSlop={{ top: 9, bottom: 9, left: 6, right: 6 }}
                 accessibilityRole="button"
                 accessibilityLabel="Limpar transcrições com falha permanente"
               >
@@ -1039,7 +1047,7 @@ export default function RecordingsScreen() {
           </YStack>
           <Link href="/recordings" asChild>
             <Pressable
-              hitSlop={8}
+              hitSlop={{ top: 14, bottom: 14, left: 15, right: 13 }}
               accessibilityRole="button"
               accessibilityLabel="Remover filtro de paciente"
             >
@@ -1056,6 +1064,7 @@ export default function RecordingsScreen() {
           alignItems="center"
           px="$3"
           gap="$2"
+          minHeight={48}
         >
           <Search size={18} color={c.textSecondary} />
           <TextInput
@@ -1077,7 +1086,7 @@ export default function RecordingsScreen() {
           {searchQuery.length > 0 && (
             <Pressable
               onPress={() => setSearchQuery('')}
-              hitSlop={8}
+              hitSlop={{ top: 15, bottom: 15, left: 17, right: 13 }}
               accessibilityRole="button"
               accessibilityLabel="Limpar busca"
             >
@@ -1088,10 +1097,10 @@ export default function RecordingsScreen() {
       )}
 
       {recordings.length > 0 && (
-        <XStack alignItems="center" justifyContent="flex-end" px="$1">
+        <XStack alignItems="center" justifyContent="flex-end" px="$1" minHeight={48} marginVertical={-13}>
           <Pressable
             onPress={() => setSortDesc((v) => !v)}
-            hitSlop={8}
+            style={{ minHeight: 48, justifyContent: 'center', paddingHorizontal: 8 }}
             accessibilityRole="button"
             accessibilityLabel={sortDesc ? 'Ordenar: mais recentes primeiro' : 'Ordenar: mais antigas primeiro'}
           >
@@ -1120,6 +1129,7 @@ export default function RecordingsScreen() {
               alignItems="center"
               justifyContent="space-between"
               gap="$2"
+              minHeight={48}
             >
               <Text fontWeight="700" fontSize={13} color={c.secondary}>
                 {showFilters ? '▼ Filtros Avançados' : '▶ Filtros Avançados'}
@@ -1152,6 +1162,7 @@ export default function RecordingsScreen() {
                     return (
                       <Pressable
                         key={opt.id}
+                        style={{ minHeight: 48, justifyContent: 'center' }}
                         onPress={() => setDateRange(opt.id)}
                         accessibilityRole="radio"
                         accessibilityLabel={opt.label}
@@ -1236,6 +1247,7 @@ export default function RecordingsScreen() {
                             : 'Digite datas válidas (DD/MM/AAAA)'}
                         </Text>
                         <Pressable
+                          style={{ minHeight: 48, minWidth: 48, justifyContent: 'center', alignItems: 'center' }}
                           onPress={() => {
                             setCustomDateStart('');
                             setCustomDateEnd('');
@@ -1262,6 +1274,7 @@ export default function RecordingsScreen() {
                   {allTemplates.map((t) => (
                     <Pressable
                       key={t.id}
+                      style={{ minHeight: 48, justifyContent: 'center' }}
                       onPress={() => {
                         const newSet = new Set(selectedTemplates);
                         if (newSet.has(t.id)) {
@@ -1310,6 +1323,7 @@ export default function RecordingsScreen() {
                   {['draft', 'processed', 'finalized'].map((s) => (
                     <Pressable
                       key={s}
+                      style={{ minHeight: 48, justifyContent: 'center' }}
                       onPress={() => {
                         const newSet = new Set(selectedStatuses);
                         if (newSet.has(s)) {
@@ -1371,6 +1385,7 @@ export default function RecordingsScreen() {
                     alignItems="center"
                     justifyContent="center"
                     gap="$2"
+                    minHeight={48}
                   >
                     <X size={14} color={c.secondary} />
                     <Text color={c.secondary} fontWeight="700" fontSize={12}>
@@ -1538,6 +1553,7 @@ export default function RecordingsScreen() {
                 >
                   <XStack alignItems="center" gap="$3">
                     <Pressable
+                      style={[swipeStyles.iconTouch, { marginRight: -13 }]}
                       onPress={() => togglePlay(item.uri)}
                       disabled={!item.localFileExists}
                       accessibilityRole="button"
@@ -1600,6 +1616,7 @@ export default function RecordingsScreen() {
                             accessibilityHint="Digite o novo nome para esta gravação"
                           />
                           <Pressable
+                            style={swipeStyles.iconTouch}
                             onPress={() => saveEdit(item)}
                             accessibilityRole="button"
                             accessibilityLabel="Salvar nome"
@@ -1607,6 +1624,7 @@ export default function RecordingsScreen() {
                             <Check size={22} color={c.primary} />
                           </Pressable>
                           <Pressable
+                            style={swipeStyles.iconTouch}
                             onPress={cancelEdit}
                             accessibilityRole="button"
                             accessibilityLabel="Cancelar renomeação"
@@ -1624,14 +1642,6 @@ export default function RecordingsScreen() {
                           >
                             {displayName}
                           </Text>
-                          <Pressable
-                            onPress={() => startEdit(item)}
-                            hitSlop={8}
-                            accessibilityRole="button"
-                            accessibilityLabel={`Renomear: ${displayName}`}
-                          >
-                            <Pencil size={16} color={c.textSecondary} />
-                          </Pressable>
                         </XStack>
                       )}
                       <Text color={c.textMuted} fontSize={12} mt="$1">
@@ -1672,12 +1682,23 @@ export default function RecordingsScreen() {
                       </XStack>
                     )}
 
+                    {!isEditing && (
+                      <Pressable
+                        onPress={() => startEdit(item)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Renomear: ${displayName}`}
+                        style={[swipeStyles.iconTouch, { marginLeft: -13 }]}
+                      >
+                        <Pencil size={16} color={c.textSecondary} />
+                      </Pressable>
+                    )}
+
                     <Pressable
                       onPress={() => {
                         setMenuFile(item.fileName);
                         setMenuVisible(true);
                       }}
-                      hitSlop={8}
+                      style={[swipeStyles.iconTouch, { marginLeft: -13 }]}
                       accessibilityRole="button"
                       accessibilityLabel={`Mais ações: ${displayName}`}
                     >
@@ -1823,6 +1844,7 @@ export default function RecordingsScreen() {
                             justifyContent="center"
                             gap="$2"
                             mt="$1"
+                            minHeight={48}
                           >
                             <BookOpen size={14} color={c.primary} />
                             <Text color={c.primary} fontWeight="700" fontSize={12}>
@@ -1849,6 +1871,7 @@ export default function RecordingsScreen() {
                             justifyContent="center"
                             gap="$2"
                             mt="$2"
+                            minHeight={48}
                           >
                             {isProcessing ? (
                               <>
@@ -1916,6 +1939,7 @@ export default function RecordingsScreen() {
                         alignItems="center"
                         justifyContent="center"
                         gap="$2"
+                        minHeight={48}
                       >
                         {isTranscribing ? (
                           <>
@@ -1978,7 +2002,7 @@ export default function RecordingsScreen() {
             </Text>
             <Pressable
               onPress={() => setTemplatePickerVisible(false)}
-              hitSlop={8}
+              style={swipeStyles.iconTouch}
               accessibilityRole="button"
               accessibilityLabel="Fechar"
             >
@@ -2026,7 +2050,7 @@ export default function RecordingsScreen() {
                           e.stopPropagation();
                           setPreviewTemplateId(isExpanded ? null : t.id);
                         }}
-                        hitSlop={8}
+                        style={swipeStyles.iconTouch}
                         accessibilityRole="button"
                         accessibilityLabel={isExpanded ? 'Fechar preview do template' : `Ver preview do template ${t.name}`}
                       >
@@ -2079,6 +2103,7 @@ export default function RecordingsScreen() {
         <YStack f={1} bg={c.bgScreen} p="$4">
           <XStack alignItems="center" gap="$3" mt="$6" mb="$4">
             <Pressable
+              style={swipeStyles.iconTouch}
               onPress={closeEditTranscriptModal}
               accessibilityRole="button"
               accessibilityLabel="Fechar edição de transcrição"
@@ -2128,6 +2153,7 @@ export default function RecordingsScreen() {
                 borderRadius="$3"
                 alignItems="center"
                 gap="$2"
+                minHeight={48}
               >
                 <RefreshCw size={14} color={c.textSecondary} />
                 <Text fontSize={12} color={c.textSecondary}>
@@ -2154,6 +2180,7 @@ export default function RecordingsScreen() {
                 alignItems="center"
                 justifyContent="center"
                 gap="$2"
+                minHeight={48}
               >
                 <Check size={16} color={c.textOnAccent} />
                 <Text color={c.textOnAccent} fontWeight="700" fontSize={13}>
@@ -2179,6 +2206,7 @@ export default function RecordingsScreen() {
                 alignItems="center"
                 justifyContent="center"
                 gap="$2"
+                minHeight={48}
               >
                 <Sparkles size={16} color={c.textOnAccent} />
                 <Text color={c.textOnAccent} fontWeight="700" fontSize={13}>
@@ -2207,6 +2235,7 @@ export default function RecordingsScreen() {
             <YStack f={1} bg={c.bgScreen} p="$4">
               <XStack alignItems="center" gap="$3" mt="$6" mb="$3">
                 <Pressable
+                  style={swipeStyles.iconTouch}
                   onPress={() => setViewingTranscriptFile(null)}
                   accessibilityRole="button"
                   accessibilityLabel="Voltar para a lista de gravações"
@@ -2228,7 +2257,7 @@ export default function RecordingsScreen() {
                 ) : (
                   <Pressable
                     onPress={() => copyToClipboard(item.transcript ?? '', fullCopyKey)}
-                    hitSlop={8}
+                    style={[swipeStyles.iconTouch, { marginLeft: -13 }]}
                     accessibilityRole="button"
                     accessibilityLabel="Copiar transcrição completa"
                   >
@@ -2237,7 +2266,7 @@ export default function RecordingsScreen() {
                 )}
                 <Pressable
                   onPress={() => shareText(item.transcript ?? '', `Transcrição - ${displayName}`)}
-                  hitSlop={8}
+                  style={[swipeStyles.iconTouch, { marginLeft: -13 }]}
                   accessibilityRole="button"
                   accessibilityLabel="Compartilhar transcrição completa"
                 >
@@ -2248,7 +2277,7 @@ export default function RecordingsScreen() {
                     setViewingTranscriptFile(null);
                     setTimeout(() => openEditTranscriptModal(item), 300);
                   }}
-                  hitSlop={8}
+                  style={[swipeStyles.iconTouch, { marginLeft: -13 }]}
                   accessibilityRole="button"
                   accessibilityLabel="Editar transcrição"
                 >
@@ -2325,7 +2354,7 @@ export default function RecordingsScreen() {
                     close();
                   }}
                 >
-                  <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                  <XStack gap={12} alignItems="center" py={12} minHeight={48} borderBottomWidth={1} borderBottomColor={c.border}>
                     <Copy size={20} color={c.primary} />
                     <Text fontSize={15} color={c.text}>Copiar transcrição</Text>
                   </XStack>
@@ -2339,7 +2368,7 @@ export default function RecordingsScreen() {
                     close();
                   }}
                 >
-                  <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                  <XStack gap={12} alignItems="center" py={12} minHeight={48} borderBottomWidth={1} borderBottomColor={c.border}>
                     <Copy size={20} color={c.primary} />
                     <Text fontSize={15} color={c.text}>Copiar resumo</Text>
                   </XStack>
@@ -2353,7 +2382,7 @@ export default function RecordingsScreen() {
                     setTimeout(() => openEditTranscriptModal(item), 300);
                   }}
                 >
-                  <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                  <XStack gap={12} alignItems="center" py={12} minHeight={48} borderBottomWidth={1} borderBottomColor={c.border}>
                     <Pencil size={20} color={c.primary} />
                     <Text fontSize={15} color={c.text}>Editar transcrição</Text>
                   </XStack>
@@ -2367,7 +2396,7 @@ export default function RecordingsScreen() {
                     setTimeout(() => pickTemplateAndProcess(item), 300);
                   }}
                 >
-                  <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                  <XStack gap={12} alignItems="center" py={12} minHeight={48} borderBottomWidth={1} borderBottomColor={c.border}>
                     <RefreshCw size={20} color={c.primary} />
                     <Text fontSize={15} color={c.text}>Reprocessar com IA</Text>
                   </XStack>
@@ -2381,7 +2410,7 @@ export default function RecordingsScreen() {
                   if (content.trim()) shareText(stripMarkers(content), displayName);
                 }}
               >
-                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                <XStack gap={12} alignItems="center" py={12} minHeight={48} borderBottomWidth={1} borderBottomColor={c.border}>
                   <Share2 size={20} color={c.primary} />
                   <Text fontSize={15} color={c.text}>Compartilhar</Text>
                 </XStack>
@@ -2393,7 +2422,7 @@ export default function RecordingsScreen() {
                   handleExportPDF(item);
                 }}
               >
-                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                <XStack gap={12} alignItems="center" py={12} minHeight={48} borderBottomWidth={1} borderBottomColor={c.border}>
                   <FileDown size={20} color={c.primary} />
                   <Text fontSize={15} color={c.text}>Exportar PDF</Text>
                 </XStack>
@@ -2405,7 +2434,7 @@ export default function RecordingsScreen() {
                   handleExportPDFSigned(item);
                 }}
               >
-                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                <XStack gap={12} alignItems="center" py={12} minHeight={48} borderBottomWidth={1} borderBottomColor={c.border}>
                   <PenLine size={20} color={c.primary} />
                   <YStack f={1}>
                     <Text fontSize={15} color={c.text}>Exportar PDF assinado</Text>
@@ -2420,7 +2449,7 @@ export default function RecordingsScreen() {
                   handleExportMarkdown(item);
                 }}
               >
-                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                <XStack gap={12} alignItems="center" py={12} minHeight={48} borderBottomWidth={1} borderBottomColor={c.border}>
                   <FileCode size={20} color={c.primary} />
                   <Text fontSize={15} color={c.text}>Exportar Markdown</Text>
                 </XStack>
@@ -2432,7 +2461,7 @@ export default function RecordingsScreen() {
                   handleExportToEvoPad(item);
                 }}
               >
-                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                <XStack gap={12} alignItems="center" py={12} minHeight={48} borderBottomWidth={1} borderBottomColor={c.border}>
                   <Upload size={20} color={c.primary} />
                   <Text fontSize={15} color={c.text}>Exportar para EvoPad</Text>
                 </XStack>
@@ -2444,7 +2473,7 @@ export default function RecordingsScreen() {
                   startEdit(item);
                 }}
               >
-                <XStack gap={12} alignItems="center" py={12} borderBottomWidth={1} borderBottomColor={c.border}>
+                <XStack gap={12} alignItems="center" py={12} minHeight={48} borderBottomWidth={1} borderBottomColor={c.border}>
                   <Pencil size={20} color={c.primary} />
                   <Text fontSize={15} color={c.text}>Renomear</Text>
                 </XStack>
@@ -2467,7 +2496,7 @@ export default function RecordingsScreen() {
                   );
                 }}
               >
-                <XStack gap={12} alignItems="center" py={12}>
+                <XStack gap={12} alignItems="center" py={12} minHeight={48}>
                   <Trash2 size={20} color={c.accentRed} />
                   <Text fontSize={15} color={c.accentRed}>Excluir</Text>
                 </XStack>

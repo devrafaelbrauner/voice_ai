@@ -1,5 +1,10 @@
-// Backup cifrado v2: cripto real (scrypt + AES-GCM do @noble), SQL real (node:sqlite) e
-// dois "aparelhos" (registries de módulo separados, cada um com seu banco e sua chave).
+// Backup cifrado v2: scrypt + AES-GCM NATIVOS (react-native-quick-crypto), aqui substituído
+// por node:crypto real (jest.setup.js); o @noble é usado só como implementação de REFERÊNCIA
+// independente (compatibilidade de formato nos dois sentidos). SQL real (node:sqlite) e dois
+// "aparelhos" (registries de módulo separados, cada um com seu banco e sua chave).
+import nodeCrypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { scryptAsync } from '@noble/hashes/scrypt.js';
 import { gcm } from '@noble/ciphers/aes.js';
@@ -520,5 +525,193 @@ describe('arquivo de backup hostil (assinado com a senha certa, conteúdo malici
     const names = [...(await B.db.getAllRecordingsMeta()).keys()];
     expect(names).toEqual([REC]);
     expect((await B.db.getCustomTemplates()).map((t) => t.id)).toEqual(['tpl_ok']);
+  });
+});
+
+// ─── Cripto nativa: compatibilidade de formato com o @noble, limite de 50 MB, módulo ausente ──
+
+interface QuickCryptoMock {
+  scrypt: jest.Mock;
+  createCipheriv: jest.Mock;
+  createDecipheriv: jest.Mock;
+}
+const nativeMock = (): QuickCryptoMock => jest.requireMock('react-native-quick-crypto');
+
+/** Decifra um envelope v2 com a implementação de referência (@noble, JS puro), independente do código do app. */
+async function nobleOpen(text: string, pass: string): Promise<any> {
+  const env = JSON.parse(text);
+  const aad = new TextEncoder().encode(
+    JSON.stringify([
+      'voiceai-backup', 2, env.exportedAt, env.stats,
+      env.kdf.name, env.kdf.N, env.kdf.r, env.kdf.p, env.kdf.salt_b64, env.cipher.nonce_b64,
+    ])
+  );
+  const key = await scryptAsync(pass.normalize('NFKC'), Buffer.from(env.kdf.salt_b64, 'base64'), {
+    N: env.kdf.N, r: env.kdf.r, p: env.kdf.p, dkLen: 32,
+  });
+  const plain = gcm(key, Buffer.from(env.cipher.nonce_b64, 'base64'), aad).decrypt(Buffer.from(env.data_b64, 'base64'));
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
+describe('compatibilidade do envelope v2 (código antigo em @noble <-> código nativo)', () => {
+  // Gerado pelo código ANTERIOR (encryptBackupPayload com @noble/hashes + @noble/ciphers), senha PASS.
+  const OLD_ENVELOPE = fs.readFileSync(path.join(__dirname, 'fixtures', 'backup-v2-noble.json'), 'utf8');
+
+  test('envelope gerado pelo código antigo (@noble) é restaurado pelo código nativo', async () => {
+    const out = (await decryptBackupText(OLD_ENVELOPE, PASS)) as BackupPayload;
+    expect(out.recordings).toHaveLength(1);
+    expect(out.recordings[0]).toMatchObject({
+      fileName: REC,
+      customName: CUSTOM,
+      summary: SUMMARY,
+      patientName: PATIENT,
+      transcript: `${TRANSCRIPT} Ação: não há — 😀`,
+    });
+  });
+
+  test('o mesmo envelope antigo com senha errada ou adulterado continua sendo recusado', async () => {
+    await expect(decryptBackupText(OLD_ENVELOPE, `${PASS}x`)).rejects.toBeInstanceOf(BackupPassphraseError);
+    const bad = mutate(OLD_ENVELOPE, (env) => { env.stats.finalized = 0; });
+    await expect(decryptBackupText(bad, PASS)).rejects.toBeInstanceOf(BackupPassphraseError);
+  });
+
+  test('envelope gerado pelo código nativo abre no código antigo (referência @noble)', async () => {
+    const text = await encryptBackupPayload(samplePayload(), PASS);
+    const opened = await nobleOpen(text, PASS);
+    expect(opened.recordings[0]).toMatchObject({ fileName: REC, transcript: TRANSCRIPT, patientName: PATIENT });
+    // O layout é o do @noble: data_b64 = ciphertext || tag de 16 bytes (decifrável sem nenhum ajuste).
+    expect(JSON.parse(text).kdf).toMatchObject({ name: 'scrypt', N: 2 ** 14, r: 8, p: 1 });
+  });
+
+  test('o KDF nativo é chamado de forma assíncrona (callback) com N/r/p da allow-list, maxmem folgado e senha em bytes UTF-8', async () => {
+    const { backup } = newDevice();
+    const { scrypt } = nativeMock();
+    let passwordAtCall = '';
+    scrypt.mockImplementationOnce((pw: Uint8Array, ...rest: unknown[]) => {
+      passwordAtCall = Buffer.from(pw).toString('utf8'); // o app zera a senha em bytes assim que o KDF termina
+      return (nodeCrypto.scrypt as (...a: unknown[]) => void)(pw, ...rest);
+    });
+    await backup.decryptBackupText(OLD_ENVELOPE, PASS.normalize('NFD'));
+    expect(scrypt).toHaveBeenCalledTimes(1);
+    const [password, salt, keylen, opts, cb] = scrypt.mock.calls[0];
+    expect(passwordAtCall).toBe(PASS); // senha em bytes UTF-8 (a normalização NFKC tem teste próprio acima)
+    expect([...password].every((b) => b === 0)).toBe(true);
+    expect(salt).toHaveLength(16);
+    expect(keylen).toBe(32);
+    expect(opts).toMatchObject({ N: 2 ** 14, r: 8, p: 1 });
+    expect(opts.maxmem).toBeGreaterThanOrEqual(128 * 8 * 2 ** 16);
+    expect(typeof cb).toBe('function'); // nunca a variante *Sync
+  });
+
+  test('arquivo grande (~30 MB de payload) faz round-trip pelo caminho nativo', async () => {
+    const big = samplePayload();
+    big.recordings[0].transcript = 'á'.repeat(15 * MB); // 2 bytes UTF-8 por caractere
+    const text = await encryptBackupPayload(big, PASS);
+    expect(text.length).toBeLessThan(50 * MB);
+    const out = (await decryptBackupText(text, PASS)) as BackupPayload;
+    expect(out.recordings[0].transcript).toHaveLength(15 * MB);
+  });
+});
+
+describe('limite de 50 MB: checado ANTES de qualquer KDF/cifra', () => {
+  const URI = 'file:///cache/picked/arquivo.json';
+
+  /** Registry novo: o módulo nativo mockado e o backup compartilham a MESMA instância dos spies. */
+  function fresh() {
+    const d = newDevice();
+    return { d, native: nativeMock() };
+  }
+  /** Garante que o módulo nativo já foi carregado (sonda de cifra) antes de zerar os spies. */
+  async function warmUp(d: Device, native: QuickCryptoMock) {
+    await d.backup.encryptBackupPayload(samplePayload(), PASS);
+    expect(native.scrypt).toHaveBeenCalledTimes(1); // o spy enxerga o backup deste registry (teste não é vácuo)
+    native.scrypt.mockClear();
+    native.createCipheriv.mockClear();
+  }
+
+  test('exportação: payload que estoura o limite falha na hora, sem scrypt nem cifra', async () => {
+    const { d, native } = fresh();
+    await warmUp(d, native);
+    const huge = samplePayload();
+    huge.recordings[0].transcript = 'a'.repeat(40 * MB); // 40 MB de payload -> ~53 MB em base64
+    const t0 = Date.now();
+    await expect(d.backup.encryptBackupPayload(huge, PASS)).rejects.toThrow(/passaria de 50 MB/);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(native.scrypt).not.toHaveBeenCalled();
+    expect(native.createCipheriv).not.toHaveBeenCalled();
+  });
+
+  test('exportBackup: erro claro, nada é gravado nem compartilhado e o KDF não roda', async () => {
+    const { d, native } = fresh();
+    // Linha em texto puro (formato legado, lido como está): evita cifrar 40 MB em JS só para montar o cenário.
+    (await rawSqlite(d)).prepare('INSERT INTO recordings (fileName, transcript) VALUES (?, ?)').run(REC, 'a'.repeat(40 * MB));
+    await expect(d.backup.exportBackup(PASS)).rejects.toThrow(/passaria de 50 MB/);
+    expect(native.scrypt).not.toHaveBeenCalled();
+    expect(d.sharing.shareAsync).not.toHaveBeenCalled();
+    expect([...fakeFs().keys()].filter((k) => k.includes('/exports/'))).toEqual([]);
+  });
+
+  test('restauração: arquivo > 50 MB é recusado pelo tamanho, sem ler nem derivar chave', async () => {
+    const { d, native } = fresh();
+    await warmUp(d, native);
+    fakeFs().set(URI, { size: 50 * MB + 1 }); // text() lançaria outro erro se a checagem faltasse
+    const t0 = Date.now();
+    await expect(d.backup.restoreBackup(URI, PASS)).rejects.toThrow(/mais de 50 MB/);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(native.scrypt).not.toHaveBeenCalled();
+  });
+
+  test('decryptBackupText: texto > 50 MB é recusado antes de parsear e sem KDF', async () => {
+    const { d, native } = fresh();
+    await warmUp(d, native);
+    await expect(d.backup.decryptBackupText('x'.repeat(50 * MB + 1), PASS)).rejects.toThrow(/mais de 50 MB/);
+    expect(native.scrypt).not.toHaveBeenCalled();
+  });
+
+  test('ciphertext curto demais para conter a tag é recusado sem gastar o KDF', async () => {
+    const { d, native } = fresh();
+    const file = await d.backup.encryptBackupPayload(samplePayload(), PASS);
+    native.scrypt.mockClear();
+    const bad = mutate(file, (env) => { env.data_b64 = 'AAAA'; });
+    await expect(d.backup.decryptBackupText(bad, PASS)).rejects.toThrow(/incompleto|corrompido/);
+    expect(native.scrypt).not.toHaveBeenCalled();
+  });
+
+  test('base64 inválido (salt) é recusado sem KDF e sem virar "senha errada"', async () => {
+    const { d, native } = fresh();
+    const file = await d.backup.encryptBackupPayload(samplePayload(), PASS);
+    native.scrypt.mockClear();
+    const bad = mutate(file, (env) => { env.kdf.salt_b64 = '!!!!!!!!!!!!!!!!'; });
+    const err = await d.backup.decryptBackupText(bad, PASS).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(d.backup.BackupPassphraseError);
+    expect((err as Error).message).toMatch(/base64/);
+    expect(native.scrypt).not.toHaveBeenCalled();
+  });
+
+  test('allow-list: parâmetro recusado antes do KDF também não chama o scrypt nativo', async () => {
+    const { d, native } = fresh();
+    const file = await d.backup.encryptBackupPayload(samplePayload(), PASS);
+    native.scrypt.mockClear();
+    const bad = mutate(file, (env) => { env.kdf.N = 2 ** 20; });
+    await expect(d.backup.decryptBackupText(bad, PASS)).rejects.toThrow(/não suportados/);
+    expect(native.scrypt).not.toHaveBeenCalled();
+  });
+});
+
+describe('módulo nativo ausente (binário sem react-native-quick-crypto)', () => {
+  test('exportar e restaurar falham com erro claro: sem JS puro e sem passar por "senha errada"', async () => {
+    const file = await encryptBackupPayload(samplePayload(), PASS);
+    const { backup } = newDevice();
+    const mod = nativeMock();
+    const missing = () => { throw new Error('Nitro: HybridObject CipherFactory not found'); };
+
+    mod.createCipheriv.mockImplementationOnce(missing);
+    await expect(backup.encryptBackupPayload(samplePayload(), PASS)).rejects.toThrow(/criptografia nativa/i);
+
+    mod.createCipheriv.mockImplementationOnce(missing);
+    const err = await backup.decryptBackupText(file, PASS).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(backup.BackupPassphraseError);
+    expect((err as Error).message).toMatch(/criptografia nativa/i);
+    expect(mod.scrypt).not.toHaveBeenCalled();
   });
 });
