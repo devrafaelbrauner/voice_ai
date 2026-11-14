@@ -3,11 +3,8 @@
 
 import { supabase } from './supabase';
 import { logError } from './log';
-import { File } from 'expo-file-system';
-import { fetch as expoFetch } from 'expo/fetch';
 import { secureFetch } from './secure-fetch';
 import {
-  WHISPER_MEDICAL_PROMPT,
   isReasoningModel,
   needsCompletionTokens,
 } from './openai-shared';
@@ -15,13 +12,6 @@ import {
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
 
 const CHAT_TIMEOUT_MS = 60_000;        // 1 min
-const TRANSCRIBE_TIMEOUT_MS = 120_000; // 2 min
-
-interface TranscribeProxyResult {
-  text: string;
-  audioSeconds: number;
-  costUSD: number;
-}
 
 interface ChatProxyResult {
   content: string;
@@ -33,75 +23,6 @@ interface ChatProxyResult {
 async function getAccessToken(): Promise<string | null> {
   const { data } = await supabase.auth.getSession();
   return data.session?.access_token ?? null;
-}
-
-// expoFetch + timeout — necessário para uploads multipart (File nativo do Expo).
-// Chamadas JSON usam secureFetch (domain whitelist + HTTPS enforcement).
-async function expoFetchWithTimeout(
-  url: string,
-  init: RequestInit,
-  timeoutMs: number
-): Promise<Response> {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await expoFetch(url, { ...init, signal: controller.signal });
-  } catch (err: any) {
-    if (err?.name === 'AbortError') {
-      throw new Error(`Tempo esgotado (${timeoutMs / 1000}s). Verifique sua conexão e tente novamente.`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(id);
-  }
-}
-
-function createTranscriptionFormData(audioUri: string): FormData {
-  const file = new File(audioUri);
-  const formData = new FormData();
-  formData.append('file', file as unknown as Blob, file.name || 'recording.m4a');
-  formData.append('model', 'whisper-1');
-  formData.append('language', 'pt');
-  formData.append('response_format', 'json');
-  formData.append('prompt', WHISPER_MEDICAL_PROMPT);
-  return formData;
-}
-
-export async function transcribeViaProxy(
-  audioUri: string,
-  audioBytes: number
-): Promise<TranscribeProxyResult> {
-  const token = await getAccessToken();
-  if (!token) throw new Error('Sessão Supabase necessária para usar o proxy.');
-
-  const response = await expoFetchWithTimeout(
-    `${SUPABASE_URL}/functions/v1/openai-transcribe`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'x-audio-bytes': String(audioBytes),
-      },
-      body: createTranscriptionFormData(audioUri),
-    },
-    TRANSCRIBE_TIMEOUT_MS
-  );
-
-  const body = await response.text();
-  if (!response.ok) {
-    throw new Error(`Proxy transcribe ${response.status}: ${body.slice(0, 200)}`);
-  }
-
-  const json = JSON.parse(body);
-
-  // Bug #9: Whisper pode retornar text undefined/null/'' para áudio silencioso
-  const text: string = typeof json.text === 'string' ? json.text : '';
-
-  return {
-    text,
-    audioSeconds: json.audio_seconds ?? 0,
-    costUSD: json.cost_usd ?? 0,
-  };
 }
 
 export async function chatViaProxy(args: {

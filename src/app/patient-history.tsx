@@ -12,7 +12,6 @@ import {
   FlatList,
   Pressable,
   Alert,
-  ScrollView,
   StyleSheet,
   View,
 } from 'react-native';
@@ -185,7 +184,8 @@ export default function PatientHistoryScreen() {
   const toggleTranscript = (fileName: string) => {
     setExpandedTranscripts((prev) => {
       const next = new Set(prev);
-      next.has(fileName) ? next.delete(fileName) : next.add(fileName);
+      if (next.has(fileName)) next.delete(fileName);
+      else next.add(fileName);
       return next;
     });
   };
@@ -193,7 +193,8 @@ export default function PatientHistoryScreen() {
   const toggleSummary = (fileName: string) => {
     setExpandedSummaries((prev) => {
       const next = new Set(prev);
-      next.has(fileName) ? next.delete(fileName) : next.add(fileName);
+      if (next.has(fileName)) next.delete(fileName);
+      else next.add(fileName);
       return next;
     });
   };

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo, useRef, memo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   FlatList,
   Pressable,
@@ -790,7 +790,6 @@ export default function RecordingsScreen() {
     setExportingUri(item.uri);
     try {
       const doctor = await getDoctorProfile();
-      const displayName = item.customName ?? formatDefaultName(item.createdAt);
 
       const result = await exportToEvoPad({
         patientName: item.patientName ?? 'Paciente sem nome',

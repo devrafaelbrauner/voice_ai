@@ -7,7 +7,7 @@
  *   • Filled progress track (tap anywhere to seek)
  *   • Buffering indicator
  */
-import React, { useRef, useState } from 'react';
+import React, { useState } from 'react';
 import { View, Pressable, StyleSheet, LayoutChangeEvent } from 'react-native';
 import { Text, XStack } from 'tamagui';
 import { useColors } from '../context/ThemeContext';

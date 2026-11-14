@@ -156,7 +156,6 @@ export default function SettingsScreen() {
     city: '',
     professionalEnabled: false,
   });
-  const [doctorSaved, setDoctorSaved] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
   const [model, setModelState] = useState<OpenAIModel>('gpt-4o-mini');
   const [transcriptionModel, setTranscriptionModelState] = useState<TranscriptionModelId>('whisper-1');
@@ -487,12 +486,6 @@ export default function SettingsScreen() {
     await clearApiKey();
     setKey('');
     Alert.alert('Removida', 'API key apagada do dispositivo.');
-  };
-
-  const handleSaveDoctor = async () => {
-    await setDoctorProfile(doctor);
-    setDoctorSaved(true);
-    setTimeout(() => setDoctorSaved(false), 2000);
   };
 
   const handleAutoSaveProfile = async () => {

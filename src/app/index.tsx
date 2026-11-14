@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { Animated } from 'react-native';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { RecordButton } from '../components/RecordButton';
 import { WaveformLive } from '../components/WaveformLive';
@@ -13,7 +12,7 @@ import {
   Trash2,
 } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
-import { Alert, Linking, Pressable } from 'react-native';
+import { Alert, Animated, Linking, Pressable } from 'react-native';
 import { useColors } from '../context/ThemeContext';
 import { useThemeStore } from '../hooks/useTheme';
 import { glass } from '../utils/glass';

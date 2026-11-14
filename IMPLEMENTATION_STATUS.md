@@ -46,9 +46,8 @@
 
 #### Phase 2: Fallback for EvoPad Web (✅ Complete)
 - **`src/services/evopad-export.ts`**
-  - `discoverEvoPadServer()` - auto-detects localhost:5173/3000
-  - `exportEvolutionToEvoPad()` - exports with Supabase fallback
-  - `syncEvolutionWithEvoPad()` - syncs changes to local EvoPad
+  - `discoverEvoPadServer()` - detecta localhost:4173
+  - `exportToEvoPad()` - exporta a gravação para o EvoPad
   - `isEvoPadAvailable()` - connectivity check
 
 - **Integration in `src/app/recordings.tsx`**
@@ -122,9 +121,9 @@
 
 - ⚠️ **RLS Verification** - Test that users can't access other users' evolutions
 - ⚠️ **LGPD Consent Screen** - Legal compliance for medical data (Brazil)
-- ⚠️ **Audio Encryption** - Encrypt .m4a files at rest
-- ⚠️ **Timeout + Rate Limiting** - Protect OpenAI API from abuse
-- ⚠️ **Backup Strategy** - Document data backup procedures
+- ⚠️ **Audio Encryption** - .m4a não é cifrado em repouso (é apagado após transcrição bem-sucedida; campos do SQLite são cifrados via `db-crypto`)
+- ✅ **Rate Limiting** - `supabase/functions/_shared/rate-limit.ts` (tabela `api_rate_limits`, janelas por minuto/hora)
+- ✅ **Backup** - backup v2 cifrado com passphrase (`src/services/backup.ts`); não inclui arquivos de áudio
 
 ---
 
@@ -188,8 +187,7 @@ Data Flow:
 3. **Address Remaining Security Items**
    - Add RLS tests
    - Implement LGPD consent modal
-   - Add audio encryption
-   - Configure rate limiting
+   - Criptografia de áudio em repouso (hoje o .m4a é apagado após a transcrição)
 
 4. **Future Phases**
    - Gesture-based interactions (swipe to delete/edit)
@@ -200,4 +198,4 @@ Data Flow:
 ---
 
 **Last Updated:** 2026-05-24
-**Status:** Production Ready (pending deployment)
+**Status:** pendente de deploy e de verificação em aparelho
