@@ -18,6 +18,9 @@
 - Gravação excluída durante transcrição/IA não é recriada (`updateFieldIfExists`).
 - **Requer novo binário nativo** (`expo-document-picker`) e a migration Supabase com `doctor_profiles.professional_enabled`.
 
+### Testes
+- Suíte jest-expo (`npm test`): 196 testes de backup v2, banco/tombstones (SQL real via `node:sqlite`), sync, motor de transcrição e fila; 26 mutantes de produto detectados. Requer Node >= 22.
+
 ### Corrigido
 - Edge Functions `openai-chat` e `openai-transcribe`: `json()` referenciava `corsHeaders` fora de escopo (ReferenceError em toda resposta de erro).
 - `gpt-5.4-mini` aceito no proxy (`max_completion_tokens`, sem `temperature`); custo reportado 0 até o preço ser confirmado.
