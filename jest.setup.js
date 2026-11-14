@@ -91,6 +91,51 @@ jest.mock('expo-crypto', () => ({
   randomUUID: () => require('node:crypto').randomUUID(),
 }));
 
+// react-native-quick-crypto (scrypt + AES-256-GCM nativos) -> node:crypto REAL, mesma API e
+// mesmos parâmetros (scrypt assíncrono em callback, createCipheriv/Decipheriv, setAAD/setAuthTag).
+// jest.fn para os testes inspecionarem chamadas (ex.: "o KDF não rodou").
+jest.mock('react-native-quick-crypto', () => {
+  const nodeCrypto = require('node:crypto');
+  return {
+    __esModule: true,
+    scrypt: jest.fn((...args) => nodeCrypto.scrypt(...args)),
+    createCipheriv: jest.fn((...args) => nodeCrypto.createCipheriv(...args)),
+    createDecipheriv: jest.fn((...args) => nodeCrypto.createDecipheriv(...args)),
+    Buffer,
+    // Utils nativo (JSI/C++): bufferToString('utf8') é PERMISSIVO (bytes inválidos -> U+FFFD, como o
+    // createFromUtf8 do Hermes; o Buffer.toString do Node idem) e stringToBuffer('utf8') só emite
+    // UTF-8 bem formado. A validação estrita do app é por ida e volta, então o mock tem que ter a
+    // mesma semântica permissiva — nunca um decodificador fatal, que esconderia um erro de lógica.
+    bufferToString: jest.fn((ab, encoding, start, end) =>
+      Buffer.from(ab, start, end - start).toString(encoding === 'utf-8' ? 'utf8' : encoding)
+    ),
+    stringToBuffer: jest.fn((str, encoding) => {
+      const b = Buffer.from(str, encoding === 'utf-8' ? 'utf8' : encoding);
+      return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+    }),
+    timingSafeEqual: jest.fn((a, b) => {
+      const view = (x) => (ArrayBuffer.isView(x) ? new Uint8Array(x.buffer, x.byteOffset, x.byteLength) : new Uint8Array(x));
+      const [va, vb] = [view(a), view(b)];
+      if (va.byteLength !== vb.byteLength) throw new RangeError('Input buffers must have the same byte length');
+      return nodeCrypto.timingSafeEqual(va, vb);
+    }),
+  };
+});
+
+// react-native-quick-base64 (TurboModule nativo; decodificador estrito, como o simdutf).
+jest.mock('react-native-quick-base64', () => {
+  const strict = /^[A-Za-z0-9+/]*={0,2}$/;
+  return {
+    __esModule: true,
+    toByteArray: (b64) => {
+      if (b64.length % 4 !== 0 || !strict.test(b64)) throw new Error('Input is not valid base64-encoded data');
+      const b = Buffer.from(b64, 'base64');
+      return new Uint8Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
+    },
+    fromByteArray: (u8) => Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength).toString('base64'),
+  };
+});
+
 jest.mock('expo-document-picker', () => ({ __esModule: true, getDocumentAsync: jest.fn() }));
 jest.mock('expo-sharing', () => ({
   __esModule: true,

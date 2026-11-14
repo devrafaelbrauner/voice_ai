@@ -212,6 +212,7 @@ export default function RecordScreen() {
           <XStack gap="$3" alignItems="center">
             <Pressable
               onPress={isPaused ? resumeRecording : pauseRecording}
+              style={{ minHeight: 48, justifyContent: 'center' }}
               accessibilityRole="button"
               accessibilityLabel={isPaused ? 'Retomar gravação' : 'Pausar gravação'}
               accessibilityHint={isPaused ? 'Retoma a gravação pausada' : 'Pausa temporariamente a gravação'}
@@ -238,6 +239,7 @@ export default function RecordScreen() {
             {isPaused && (
               <Pressable
                 onPress={confirmDiscard}
+                style={{ minHeight: 48, justifyContent: 'center' }}
                 accessibilityRole="button"
                 accessibilityLabel="Descartar gravação"
                 accessibilityHint="Descarta e apaga permanentemente a gravação atual"

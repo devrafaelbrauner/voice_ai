@@ -109,7 +109,7 @@ export function AudioPlayerBar({ currentTime, duration, isBuffering, onSeek, onS
       {/* Speed toggle */}
       <Pressable
         onPress={cycleSpeed}
-        hitSlop={8}
+        style={styles.speedTouch}
         accessibilityRole="button"
         accessibilityLabel={`Velocidade de reprodução: ${speed}x`}
         accessibilityHint="Toque para alterar a velocidade de reprodução"
@@ -130,7 +130,13 @@ export function AudioPlayerBar({ currentTime, duration, isBuffering, onSeek, onS
 const styles = StyleSheet.create({
   trackContainer: {
     flex: 1,
-    paddingVertical: 8, // larger tap area
+    minHeight: 48, // alvo de toque mínimo (a trilha de 4 dp fica centralizada)
+    justifyContent: 'center',
+  },
+  speedTouch: {
+    minWidth: 48,
+    minHeight: 48,
+    alignItems: 'center',
     justifyContent: 'center',
   },
   track: {
